@@ -21,6 +21,10 @@ def test_dashboard_and_static_assets_are_served_locally() -> None:
         assert response.status_code == 200, path
 
     assert "WorksOnMyMachine" in client.get("/").text
+    dashboard_html = client.get("/").text
+    assert 'href="/static/styles.css"' in dashboard_html
+    assert 'src="/static/icons.js"' in dashboard_html
+    assert 'src="/static/app.js"' in dashboard_html
     assert "text/css" in client.get("/static/styles.css").headers["content-type"]
 
 

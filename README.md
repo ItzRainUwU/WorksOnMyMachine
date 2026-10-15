@@ -1,8 +1,29 @@
+<div align="center">
+
+<img src="https://img.shields.io/badge/tests-44%20passed-10b981?style=for-the-badge&labelColor=050811" alt="44 tests passed">
+<img src="https://img.shields.io/badge/python-3.11.9-06b6d4?style=for-the-badge&labelColor=050811" alt="Python 3.11.9">
+<img src="https://img.shields.io/badge/docker-ready-10b981?style=for-the-badge&labelColor=050811" alt="Docker ready">
+<img src="https://img.shields.io/badge/license-not%20specified-f59e0b?style=for-the-badge&labelColor=050811" alt="License not specified">
+
 # WorksOnMyMachine
 
-WorksOnMyMachine is an offline-first cross-platform reproducibility platform
-for projects that work on a developer workstation but fail in a clean Linux
-environment.
+### CleanRoom reproducibility for builds that only work on one machine
+
+Scan cross-OS landmines, diagnose Linux compiler failures, heal Dockerfiles,
+and produce deterministic SHA-256 evidence without executing untrusted target
+code.
+
+<a href="#quick-start">Quick start</a> ·
+<a href="#the-healing-loop">How it works</a> ·
+<a href="#dashboard">Dashboard</a> ·
+<a href="#api-reference">API</a> ·
+<a href="#development">Development</a>
+
+</div>
+
+> WorksOnMyMachine is an offline-first cross-platform reproducibility platform
+> for projects that work on a developer workstation but fail in a clean Linux
+> environment.
 
 It combines portability scanning, compiler-log diagnosis, Dockerfile repair,
 deterministic Merkle hashing, CleanRoom certificates, and a local cyber-
@@ -27,6 +48,25 @@ target repository without modifying the source fixture.
   evidence, Docker hardening, file hashes, and drift metadata into a certificate.
 - **Self-contained dashboard** — Serves local HTML, CSS, JavaScript, and custom
   SVG visualizations without CDNs, icon fonts, or external runtime services.
+
+## The healing loop
+
+```mermaid
+flowchart LR
+    A[Target repository] --> B[Cross-OS scanner]
+    B --> C{Landmines found?}
+    C -->|no| D[Generate certificate]
+    C -->|yes| E[Copy-on-write staging]
+    E --> F[Source and config healer]
+    E --> G[Compiler log parser]
+    G --> H[APT package injector]
+    H --> I[Dockerfile hardener]
+    F --> J[Re-scan staged tree]
+    I --> J
+    J --> D
+    D --> K[CleanRoom certificate]
+    K --> L[Dashboard, CLI, or API]
+```
 
 ## Architecture
 
@@ -53,6 +93,18 @@ target repository without modifying the source fixture.
 
 The engine never executes target code during inspection. Auto-healing is
 copy-on-write and produces unified diffs for review.
+
+## What breaks, and how it is healed
+
+| What breaks on clean Linux | How WorksOnMyMachine heals it |
+| --- | --- |
+| `from utils.DataLoader` while the file is `dataloader.py` | Enumerates every path segment and rewrites import casing without trusting the host filesystem. |
+| `C:\Users\Dev\models\weights.bin` or `data\\cache\\items.json` | Detects host-specific paths and normalizes them to portable project-relative paths. |
+| `entrypoint.sh` has CRLF endings or no shebang | Reads shell bytes directly, converts CRLF to LF, adds a portable shebang, and applies execute permissions in staging. |
+| `Python.h`, `ffi.h`, `pg_config`, or `libGL.so.1` is missing | Maps compiler/runtime signatures to deterministic Debian/Ubuntu apt packages. |
+| `FROM python:latest` and root execution | Pins the image, consolidates the apt layer, cleans apt metadata, and adds a non-root runtime user. |
+| Unpinned `requirements.txt`, Cargo, or lock evidence | Scores dependency determinism and refuses certification when lock evidence is incomplete. |
+| Different line endings or file ordering across hosts | Normalizes text hashing and computes a metadata-independent Merkle root. |
 
 ## Requirements
 
@@ -183,7 +235,7 @@ The image uses `python:3.11.9-slim`, installs the locked requirements, copies
 the application, static dashboard, and demo targets, and runs as the non-root
 `appuser` account.
 
-## Test and development
+## Development
 
 Run the complete offline suite:
 
@@ -268,3 +320,10 @@ LLM_MODEL=gpt-4o-mini
 
 The deterministic scanner, parser, healer, certificate engine, dashboard, and
 tests work without `LLM_API_KEY` or any network connection.
+
+## License
+
+No license file is currently committed. Before publishing this repository as a
+public open-source project, choose and add an OSI-approved license that matches
+your contribution and distribution policy. Until then, the source remains
+copyrighted by default.

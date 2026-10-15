@@ -1,6 +1,7 @@
 """Phase 4 reproducibility, CLI, and API integration tests."""
 
 from pathlib import Path
+import json
 import os
 import subprocess
 import sys
@@ -10,7 +11,18 @@ from fastapi.testclient import TestClient
 
 from worksonmymachine.app import app
 from worksonmymachine.cli import main
-from worksonmymachine.models import FileHashNode
+from worksonmymachine.config import SuppressionRule, WorkspaceConfig
+from worksonmymachine.exports import (
+    ci_exit_code,
+    filter_issues,
+    issue_fingerprint,
+    load_baseline,
+    markdown_summary,
+    report_json,
+    sarif_report,
+    write_baseline,
+)
+from worksonmymachine.models import AuditReport, FileHashNode, LandmineIssue, ReproducibilityCertificate
 from worksonmymachine.repro_hash import (
     calculate_dependency_lock_score,
     compare_certificates,
@@ -212,3 +224,89 @@ def test_reproducibility_api_endpoints() -> None:
     audit_body = audit_response.json()
     assert audit_body["after_certificate"]["is_cleanroom_certified"] is True
     assert audit_body["timeline"]
+
+
+def _export_fixture() -> tuple[AuditReport, LandmineIssue, LandmineIssue]:
+    high = LandmineIssue(
+        issue_id="REQ-UNPINNED",
+        category="DEPENDENCY_LOCK",
+        message="Dependency is not pinned.",
+        severity="high",
+        file_path="requirements.txt",
+        line_number=1,
+    )
+    low = LandmineIssue(
+        issue_id="PATH-BACKSLASH",
+        category="BACKSLASH_PATH",
+        message="Backslash path literal is not portable.",
+        severity="low",
+        file_path="app.py",
+        line_number=4,
+    )
+    certificate = ReproducibilityCertificate(
+        certificate_id="cert-export",
+        root_hash="root-hash",
+        runtime="python:3.11",
+        linux_readiness_score=82.5,
+        is_cleanroom_certified=False,
+    )
+    return AuditReport(target="fixture", issues=[high, low], certificate=certificate), high, low
+
+
+def test_export_formats_and_baseline_filtering_are_stable(tmp_path: Path) -> None:
+    report, high, low = _export_fixture()
+
+    assert '"target": "fixture"' in report_json(report)
+    sarif = json.loads(sarif_report(report))
+    assert sarif["version"] == "2.1.0"
+    assert len(sarif["runs"][0]["results"]) == 2
+    assert "DEPENDENCY_LOCK" in markdown_summary(report)
+
+    baseline = tmp_path / "baseline.json"
+    write_baseline(baseline, "fixture", [high])
+    assert issue_fingerprint(high) in load_baseline(baseline)
+    active, suppressed = filter_issues(
+        [high, low],
+        WorkspaceConfig(),
+        load_baseline(baseline),
+        new_only=True,
+    )
+    assert active == [low]
+    assert suppressed == [high]
+
+
+def test_configured_suppression_and_ci_exit_policy() -> None:
+    report, high, low = _export_fixture()
+    config = WorkspaceConfig(
+        suppressions=(SuppressionRule(issue_id=high.issue_id, reason="Tracked upstream."),)
+    )
+
+    active, suppressed = filter_issues([high, low], config)
+    assert active == [low]
+    assert suppressed == [high]
+    assert ci_exit_code(report, active, fail_on="high") == 0
+    assert ci_exit_code(report, active, fail_on="low") == 1
+    assert ci_exit_code(report, active, min_readiness=90.0) == 1
+    assert ci_exit_code(report, active, require_reproducible=True) == 2
+
+
+def test_cli_audit_formats_and_baseline_options(tmp_path: Path) -> None:
+    runner = CliRunner()
+    baseline = tmp_path / "baseline.json"
+
+    sarif_result = runner.invoke(main, ["audit", "nightmare_ml_service", "--format", "sarif"])
+    baseline_result = runner.invoke(
+        main,
+        ["audit", "nightmare_ml_service", "--format", "json", "--baseline", str(baseline), "--write-baseline"],
+    )
+    new_only_result = runner.invoke(
+        main,
+        ["check", "nightmare_ml_service", "--format", "json", "--baseline", str(baseline), "--new-only"],
+    )
+
+    assert sarif_result.exit_code == 0, sarif_result.output
+    assert '"version": "2.1.0"' in sarif_result.output
+    assert baseline_result.exit_code == 0, baseline_result.output
+    assert baseline.is_file()
+    assert new_only_result.exit_code == 0, new_only_result.output
+    assert '"issues": []' in new_only_result.output

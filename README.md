@@ -3,7 +3,7 @@
 **Autonomous Cross-OS (Windows/macOS-to-Linux) Reproducibility Scanner, Compiler `apt` Auto-Healer & Merkle Certification Engine.**
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Tests-44%20Passed-10b981?style=for-the-badge&labelColor=050811" alt="Tests: 44 passed">
+  <img src="https://img.shields.io/badge/Tests-54%20Passed-10b981?style=for-the-badge&labelColor=050811" alt="Tests: 54 passed">
   <img src="https://img.shields.io/badge/Python-3.11.9-06b6d4?style=for-the-badge&labelColor=050811" alt="Python 3.11.9">
   <img src="https://img.shields.io/badge/CleanRoom-100%25%20Deterministic-10b981?style=for-the-badge&labelColor=050811" alt="CleanRoom: 100 percent deterministic">
 </p>
@@ -175,7 +175,47 @@ PYTHONPATH=src python -m worksonmymachine scan nightmare_ml_service
 PYTHONPATH=src python -m worksonmymachine parse-log nightmare_ml_service
 PYTHONPATH=src python -m worksonmymachine certify nightmare_ml_service --json
 PYTHONPATH=src python -m worksonmymachine heal nightmare_ml_service --json
+PYTHONPATH=src python -m worksonmymachine audit workspace --auto-heal --format markdown --output audit.md
+PYTHONPATH=src python -m worksonmymachine check workspace --format sarif --fail-on high
+PYTHONPATH=src python -m worksonmymachine certify workspace --output certificate.json
 ```
+
+`audit` and `check` accept any normalized workspace-relative target, including
+`workspace` and paths such as `projects/api-service`. They support `text`,
+`json`, `sarif`, `markdown`, and `patch` artifacts. `--auto-heal` only operates
+on a temporary copy; source files are never changed in place.
+
+For CI, use `--fail-on critical|high|medium|low`, `--min-readiness 0..100`,
+and `--require-reproducible`. The command returns exit code `0` when the policy
+passes, `1` for a policy failure, and `2` when reproducibility is required but
+the CleanRoom certificate is not valid.
+
+### Baselines and suppressions
+
+Create a reviewable finding baseline and then report only new findings:
+
+```bash
+PYTHONPATH=src python -m worksonmymachine audit workspace \
+  --format json --write-baseline --baseline .worksonmymachine-baseline.json \
+  --output audit.json
+PYTHONPATH=src python -m worksonmymachine check workspace \
+  --new-only --baseline .worksonmymachine-baseline.json --fail-on high
+```
+
+Intentional findings can be listed in `.worksonmymachine.toml`. Every
+suppression requires a reason and may have an ISO date expiry:
+
+```toml
+[[suppressions]]
+issue_id = "REQ-UNPINNED"
+path = "legacy/requirements.txt"
+reason = "Managed by the platform dependency service"
+expires = "2027-01-01"
+```
+
+The Reports drawer in the dashboard provides local downloads for the audit JSON,
+CleanRoom certificate JSON, unified patch, SARIF, and Markdown artifacts from
+the current audit.
 
 When installed as a package in your virtual environment, you can also run:
 
@@ -266,6 +306,7 @@ src/worksonmymachine/
 ├── scanner.py      Cross-OS landmine scanner and source healer
 ├── apt_healer.py   Compiler parser and Dockerfile apt healer
 ├── repro_hash.py   Merkle hashing, certificates, and audit orchestration
+├── exports.py      JSON, SARIF, Markdown, patch, baseline, and CI policy exports
 ├── cli.py          Click and Rich command-line interface
 └── static/         Self-contained dashboard and custom SVG engine
 tests/              Foundation, scanner, apt, Merkle, CLI, and E2E UI tests

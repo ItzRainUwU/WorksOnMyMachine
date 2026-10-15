@@ -926,6 +926,47 @@
     }
   }
 
+  function downloadText(filename, content, type) {
+    var blob = new Blob([content], { type: type || "text/plain" });
+    var link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = filename;
+    link.click();
+    URL.revokeObjectURL(link.href);
+    logEvent(filename + " downloaded", "success");
+  }
+
+  function clientSarif(report) {
+    var results = safeArray(report && report.issues).map(function (issue) {
+      var level = { critical: "error", high: "error", medium: "warning", low: "note" }[String(issue.severity || "medium").toLowerCase()] || "warning";
+      var result = { ruleId: issue.issue_id, level: level, message: { text: issue.message }, properties: { category: issue.category } };
+      if (issue.file_path) result.locations = [{ physicalLocation: { artifactLocation: { uri: issue.file_path }, region: { startLine: issue.line_number || 1 } } }];
+      return result;
+    });
+    return JSON.stringify({ "$schema": "https://json.schemastore.org/sarif-2.1.0.json", version: "2.1.0", runs: [{ tool: { driver: { name: "WorksOnMyMachine", version: "0.1.0" } }, results: results }] }, null, 2) + "\n";
+  }
+
+  function clientMarkdown(report) {
+    var certificate = selectedCertificate(report);
+    var lines = ["# WorksOnMyMachine audit: `" + (report.target || state.target) + "`", "", "- Readiness: **" + numberOr(certificate.linux_readiness_score, 0).toFixed(2) + "/100**", "- Reproducible: **" + (report.reproducible ? "yes" : "no") + "**", "- Findings: **" + safeArray(report.issues).length + "**", "", "| ID | Severity | Category | File | Line | Message |", "| --- | --- | --- | --- | ---: | --- |"];
+    safeArray(report.issues).forEach(function (issue) { lines.push("| `" + issue.issue_id + "` | `" + issue.severity + "` | `" + issue.category + "` | `" + (issue.file_path || "-") + "` | " + (issue.line_number || "-") + " | " + String(issue.message || "").replace(/\|/g, "\\|") + " |"); });
+    if (!report.issues || !report.issues.length) lines.push("| - | - | - | - | - | No findings |");
+    return lines.join("\n") + "\n";
+  }
+
+  function exportArtifact(kind) {
+    if (!state.report) {
+      showToast("Run an audit first.", true);
+      return;
+    }
+    var targetName = state.target.replace(/[^A-Za-z0-9._-]+/g, "-");
+    if (kind === "json") downloadText(targetName + "-audit.json", JSON.stringify(state.report, null, 2) + "\n", "application/json");
+    if (kind === "certificate") downloadText(targetName + "-certificate.json", JSON.stringify(selectedCertificate(state.report), null, 2) + "\n", "application/json");
+    if (kind === "patch") downloadText(targetName + "-healed.patch", safeArray(state.report.unified_diffs).join("\n"), "text/x-diff");
+    if (kind === "sarif") downloadText(targetName + "-audit.sarif", clientSarif(state.report), "application/sarif+json");
+    if (kind === "markdown") downloadText(targetName + "-audit.md", clientMarkdown(state.report), "text/markdown");
+  }
+
   function bindEvents() {
     on("scan-button", "click", function () { runAudit(false, false); });
     on("heal-button", "click", function () { runAudit(true, false); });
@@ -944,6 +985,11 @@
       if (certificate.root_hash) copyText(JSON.stringify(certificate, null, 2), "Certificate JSON copied."); else showToast("Generate a certificate first.", true);
     });
     on("copy-report-button", "click", function () { if (state.report) copyText(JSON.stringify(state.report, null, 2), "Audit report copied."); else showToast("Run an audit first.", true); });
+    on("download-json-button", "click", function () { exportArtifact("json"); });
+    on("download-report-certificate-button", "click", function () { exportArtifact("certificate"); });
+    on("download-patch-button", "click", function () { exportArtifact("patch"); });
+    on("download-sarif-button", "click", function () { exportArtifact("sarif"); });
+    on("download-markdown-button", "click", function () { exportArtifact("markdown"); });
     on("view-file-button", "click", function () { setDrawerView("build"); });
     on("drawer-close", "click", closeDrawer);
     on("terminal-toggle", "click", function () { setDrawerView("reports"); });

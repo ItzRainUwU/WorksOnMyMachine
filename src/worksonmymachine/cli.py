@@ -10,7 +10,18 @@ from rich.console import Console
 from rich.table import Table
 
 from .apt_healer import analyze_log_hybrid
-from .config import PROJECT_ROOT
+from .config import PROJECT_ROOT, workspace_config
+from .exports import (
+    ci_exit_code,
+    filter_issues,
+    load_baseline,
+    markdown_summary,
+    report_json,
+    report_with_issues,
+    sarif_report,
+    unified_patch,
+    write_baseline,
+)
 from .models import LandmineIssue, ReproducibilityCertificate
 from .repro_hash import generate_certificate, run_full_audit
 from .scanner import readiness_score, scan_repository
@@ -31,6 +42,8 @@ def _validate_relative_target(value: str) -> tuple[str, tuple[str, ...]]:
     raw = value.strip()
     normalized = raw.replace("\\", "/")
     parts = tuple(normalized.split("/")) if normalized else ()
+    if raw in {".", "./", "workspace"}:
+        return "workspace", ("workspace",)
     if (
         not parts
         or raw != normalized
@@ -40,26 +53,27 @@ def _validate_relative_target(value: str) -> tuple[str, tuple[str, ...]]:
         or any(part in {"", ".", ".."} for part in parts)
     ):
         raise click.BadParameter(
-            "target must be a normalized relative path inside demo_targets"
+            "target must be a normalized workspace-relative path"
         )
     return normalized, parts
 
 
 def _resolve_target(value: str) -> Path:
-    """Resolve a target below ``demo_targets`` and reject escape paths."""
+    """Resolve a fixture or workspace-relative target and reject escapes."""
 
     normalized, parts = _validate_relative_target(value)
-    demo_root = _demo_root()
-    candidate = (demo_root.joinpath(*parts)).resolve()
-    try:
-        candidate.relative_to(demo_root)
-    except ValueError as exc:
-        raise click.BadParameter(
-            "target must resolve inside demo_targets"
-        ) from exc
-    if not candidate.is_dir():
-        raise click.BadParameter(f"target not found: {normalized}")
-    return candidate
+    workspace = PROJECT_ROOT.resolve()
+    if normalized == "workspace":
+        return workspace
+    candidates = [(_demo_root() / Path(*parts)).resolve(), (workspace / Path(*parts)).resolve()]
+    for candidate in candidates:
+        try:
+            candidate.relative_to(workspace)
+        except ValueError:
+            continue
+        if candidate.is_dir():
+            return candidate
+    raise click.BadParameter(f"target not found inside workspace: {normalized}")
 
 
 def _resolve_log_input(value: str) -> tuple[str | None, Path]:
@@ -78,13 +92,7 @@ def _resolve_log_input(value: str) -> tuple[str | None, Path]:
         normalized = ""
         parts = ()
     if parts:
-        target_candidate = (_demo_root().joinpath(*parts)).resolve()
-        try:
-            target_candidate.relative_to(_demo_root())
-        except ValueError as exc:
-            raise click.BadParameter(
-                "target must resolve inside demo_targets"
-            ) from exc
+        target_candidate = _resolve_target(normalized)
         if target_candidate.is_dir():
             log_path = target_candidate / "build_error.log"
             if not log_path.is_file():
@@ -164,9 +172,148 @@ def _apt_install_command(packages: list[str]) -> str:
     )
 
 
+def _baseline_path(value: str | None) -> Path:
+    path = Path(value or workspace_config.baseline_file)
+    return path if path.is_absolute() else PROJECT_ROOT / path
+
+
+def _write_or_echo(payload: str, output: str | None) -> None:
+    if output:
+        path = Path(output)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(payload, encoding="utf-8")
+        click.echo(f"Wrote {path}", err=True)
+    else:
+        click.echo(payload, nl=not payload.endswith("\n"))
+
+
+def _run_audit_command(
+    target: str,
+    auto_heal: bool,
+    output_format: str,
+    output: str | None,
+    fail_on: str | None,
+    min_readiness: float | None,
+    new_only: bool,
+    baseline: str | None,
+    write_baseline_file: bool,
+    require_reproducible: bool,
+) -> None:
+    report = run_full_audit(_resolve_target(target), auto_heal=auto_heal)
+    baseline_file = _baseline_path(baseline)
+    baseline_values = load_baseline(baseline_file) if new_only else set()
+    effective, suppressed = filter_issues(report.issues, workspace_config, baseline_values, new_only)
+    if write_baseline_file:
+        write_baseline(baseline_file, target, report.issues)
+        click.echo(f"Wrote baseline {baseline_file}", err=True)
+    export_report = report_with_issues(report, effective)
+    if output_format == "json":
+        payload = report_json(export_report)
+    elif output_format == "sarif":
+        payload = sarif_report(export_report)
+    elif output_format == "markdown":
+        payload = markdown_summary(export_report)
+    elif output_format == "patch":
+        payload = unified_patch(export_report)
+    else:
+        console = _console()
+        _print_issue_table(console, effective)
+        certificate = report.certificate or report.after_certificate or report.before_certificate
+        score = certificate.linux_readiness_score if certificate else readiness_score(effective)
+        console.print(f"Readiness score: {score:.2f}/100")
+        if suppressed:
+            console.print(f"Suppressed or baselined findings: {len(suppressed)}")
+        code = ci_exit_code(report, effective, fail_on, min_readiness, require_reproducible)
+        if code:
+            raise click.exceptions.Exit(code)
+        return
+    _write_or_echo(payload, output)
+    code = ci_exit_code(report, effective, fail_on, min_readiness, require_reproducible)
+    if code:
+        raise click.exceptions.Exit(code)
+
+
 @click.group()
 def main() -> None:
     """Inspect, certify, and heal reproducibility landmines."""
+
+
+@main.command("audit")
+@click.argument("target", required=False, default=None)
+@click.option("--auto-heal", is_flag=True, help="Run copy-on-write healing before certification.")
+@click.option("--format", "output_format", type=click.Choice(["text", "json", "sarif", "markdown", "patch"]), default="text", show_default=True)
+@click.option("--output", type=click.Path(dir_okay=False), help="Write the selected artifact to a file.")
+@click.option("--fail-on", type=click.Choice(["critical", "high", "medium", "low"]), help="Fail CI when a finding reaches this severity.")
+@click.option("--min-readiness", type=click.FloatRange(0.0, 100.0), help="Fail CI below this readiness score.")
+@click.option("--new-only", is_flag=True, help="Exclude findings already present in the baseline.")
+@click.option("--baseline", type=click.Path(dir_okay=False), help="Baseline JSON path.")
+@click.option("--write-baseline", is_flag=True, help="Write the current raw findings as the baseline.")
+@click.option("--require-reproducible", is_flag=True, help="Fail when the CleanRoom certificate is not reproducible.")
+def audit_command(
+    target: str | None,
+    auto_heal: bool,
+    output_format: str,
+    output: str | None,
+    fail_on: str | None,
+    min_readiness: float | None,
+    new_only: bool,
+    baseline: str | None,
+    write_baseline: bool,
+    require_reproducible: bool,
+) -> None:
+    """Run a CI-friendly audit for TARGET or the configured workspace target."""
+
+    _run_audit_command(
+        target or workspace_config.target_paths[0],
+        auto_heal,
+        output_format,
+        output,
+        fail_on,
+        min_readiness,
+        new_only,
+        baseline,
+        write_baseline,
+        require_reproducible,
+    )
+
+
+@main.command("check")
+@click.argument("target", required=False, default=None)
+@click.option("--auto-heal", is_flag=True)
+@click.option("--format", "output_format", type=click.Choice(["text", "json", "sarif", "markdown", "patch"]), default="text", show_default=True)
+@click.option("--output", type=click.Path(dir_okay=False))
+@click.option("--fail-on", type=click.Choice(["critical", "high", "medium", "low"]))
+@click.option("--min-readiness", type=click.FloatRange(0.0, 100.0))
+@click.option("--new-only", is_flag=True)
+@click.option("--baseline", type=click.Path(dir_okay=False))
+@click.option("--write-baseline", is_flag=True)
+@click.option("--require-reproducible", is_flag=True)
+def check_command(
+    target: str | None,
+    auto_heal: bool,
+    output_format: str,
+    output: str | None,
+    fail_on: str | None,
+    min_readiness: float | None,
+    new_only: bool,
+    baseline: str | None,
+    write_baseline: bool,
+    require_reproducible: bool,
+) -> None:
+    """Run a CI check with the same policy and artifact formats as audit."""
+
+    _run_audit_command(
+        target or workspace_config.target_paths[0],
+        auto_heal,
+        output_format,
+        output,
+        fail_on,
+        min_readiness,
+        new_only,
+        baseline,
+        write_baseline,
+        require_reproducible,
+    )
 
 
 @main.command("scan")
@@ -254,12 +401,13 @@ def _print_certificate(
 @main.command("certify")
 @click.argument("target")
 @click.option("--json", "as_json", is_flag=True, help="Emit the certificate as JSON.")
-def certify(target: str, as_json: bool) -> None:
+@click.option("--output", type=click.Path(dir_okay=False), help="Write the certificate JSON to a file.")
+def certify(target: str, as_json: bool, output: str | None) -> None:
     """Generate a reproducibility certificate for TARGET."""
 
     certificate = generate_certificate(_resolve_target(target))
-    if as_json:
-        click.echo(certificate.model_dump_json())
+    if as_json or output:
+        _write_or_echo(certificate.model_dump_json(indent=2) + "\n", output)
         return
     _print_certificate(_console(), certificate)
 

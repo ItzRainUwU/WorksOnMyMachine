@@ -198,6 +198,26 @@ def test_workspace_config_loads_safe_defaults() -> None:
     assert configured.build_command is None
 
 
+def test_workspace_config_loads_baselines_and_suppressions(tmp_path: Path) -> None:
+    config_path = tmp_path / ".worksonmymachine.toml"
+    config_path.write_text(
+        'target_paths = ["workspace"]\n'
+        'baseline_file = ".ci/baseline.json"\n'
+        '[[suppressions]]\n'
+        'issue_id = "REQ-UNPINNED"\n'
+        'path = "legacy/requirements.txt"\n'
+        'reason = "Managed upstream"\n'
+        'expires = "2027-01-01"\n',
+        encoding="utf-8",
+    )
+
+    configured = load_workspace_config(config_path)
+
+    assert configured.baseline_file == ".ci/baseline.json"
+    assert len(configured.suppressions) == 1
+    assert configured.suppressions[0].reason == "Managed upstream"
+
+
 def test_audit_includes_dependency_telemetry() -> None:
     response = TestClient(app).post(
         "/api/v1/audit",

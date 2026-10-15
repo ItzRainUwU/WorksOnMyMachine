@@ -24,6 +24,19 @@ class WorkspaceConfig:
     test_command: str | None = None
     runtime: str | None = None
     vulnerability_database: str | None = None
+    baseline_file: str = ".worksonmymachine-baseline.json"
+    suppressions: tuple["SuppressionRule", ...] = ()
+
+
+@dataclass(frozen=True)
+class SuppressionRule:
+    """One intentional finding suppression with an audit reason."""
+
+    issue_id: str | None = None
+    path: str | None = None
+    category: str | None = None
+    reason: str = ""
+    expires: str | None = None
 
 
 @dataclass(frozen=True)
@@ -107,6 +120,39 @@ def _safe_relative_list(value: object, field_name: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(output))
 
 
+def _load_suppressions(value: object) -> tuple[SuppressionRule, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ValueError("suppressions must be an array of tables")
+    rules: list[SuppressionRule] = []
+    for raw_rule in value:
+        if not isinstance(raw_rule, dict):
+            raise ValueError("each suppression must be a TOML table")
+        reason = raw_rule.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("each suppression requires a non-empty reason")
+        path = raw_rule.get("path")
+        if path is not None:
+            path = _safe_relative_list([path], "suppression path")[0]
+        rules.append(
+            SuppressionRule(
+                issue_id=str(raw_rule["issue_id"]).strip() if raw_rule.get("issue_id") else None,
+                path=path,
+                category=str(raw_rule["category"]).strip() if raw_rule.get("category") else None,
+                reason=reason.strip(),
+                expires=str(raw_rule["expires"]).strip() if raw_rule.get("expires") else None,
+            )
+        )
+    return tuple(rules)
+
+
+def _safe_relative_file(value: object, field_name: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be a workspace-relative path")
+    return _safe_relative_list([value], field_name)[0]
+
+
 def load_workspace_config(path: Path | None = None) -> WorkspaceConfig:
     """Load optional workspace instructions without executing any commands."""
 
@@ -126,6 +172,11 @@ def load_workspace_config(path: Path | None = None) -> WorkspaceConfig:
         test_command=parsed.get("test_command") if isinstance(parsed.get("test_command"), str) else None,
         runtime=parsed.get("runtime") if isinstance(parsed.get("runtime"), str) else None,
         vulnerability_database=parsed.get("vulnerability_database") if isinstance(parsed.get("vulnerability_database"), str) else None,
+        baseline_file=_safe_relative_file(
+            parsed.get("baseline_file", ".worksonmymachine-baseline.json"),
+            "baseline_file",
+        ),
+        suppressions=_load_suppressions(parsed.get("suppressions")),
     )
 
 

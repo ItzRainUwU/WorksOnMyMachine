@@ -18,9 +18,11 @@ import tomllib
 from typing import Any, Iterable
 
 from .apt_healer import heal_dockerfile, parse_compiler_log
+from .config import workspace_config
 from .models import (
     AuditReport,
     CompilerDiagnostic,
+    DependencyTelemetry,
     DockerfilePatchResult,
     FileHashNode,
     LandmineIssue,
@@ -43,7 +45,7 @@ _EXCLUDED_DIRECTORIES = frozenset(
         ".mypy_cache",
         ".ruff_cache",
     }
-)
+) | frozenset(Path(path).name for path in workspace_config.ignore_paths)
 
 _SOURCE_SUFFIXES = frozenset(
     {
@@ -561,6 +563,140 @@ def calculate_dependency_lock_score(target_path: Path) -> float:
     return round(pin_score * 0.6 + lock_score * 0.4, 2)
 
 
+def _package_spec_is_pinned(specification: Any) -> bool:
+    """Return whether a package manifest spec is an exact version."""
+
+    if not isinstance(specification, str):
+        return False
+    value = specification.strip()
+    return bool(re.fullmatch(r"=?v?\d+(?:\.\d+)+(?:[-+][^\s]+)?", value))
+
+
+def dependency_telemetry(target_path: Path) -> DependencyTelemetry:
+    """Collect direct, resolved, and pinning evidence without network access."""
+
+    target = Path(target_path)
+    direct: set[str] = set()
+    transitive: set[str] = set()
+    pinned: set[str] = set()
+    floating: set[str] = set()
+    manifests: set[str] = set()
+
+    def add_direct(ecosystem: str, name: str, is_pinned: bool) -> None:
+        normalized = name.lower().replace("_", "-").strip()
+        if not normalized:
+            return
+        key = ecosystem + ":" + normalized
+        direct.add(key)
+        (pinned if is_pinned else floating).add(key)
+
+    def add_transitive(ecosystem: str, name: str) -> None:
+        normalized = name.lower().replace("_", "-").strip()
+        if normalized:
+            transitive.add(ecosystem + ":" + normalized)
+            pinned.add(ecosystem + ":" + normalized)
+
+    for path, relative in _iter_files(target):
+        name = path.name.lower()
+        if name in {"requirements.txt", "requirements.in"}:
+            manifests.add(relative)
+            for specification in _requirement_declarations(path):
+                dependency_name = _dependency_name(specification[0])
+                add_direct("python", dependency_name, bool(_pinned_requirement_version(specification[1])))
+        elif name == "requirements.lock":
+            manifests.add(relative)
+            valid, entries = _read_requirements_lock(path)
+            if valid:
+                for dependency_name in entries:
+                    add_transitive("python", dependency_name)
+        elif name == "pyproject.toml":
+            dependencies, valid = _toml_dependencies(path)
+            if valid:
+                manifests.add(relative)
+                for specification in dependencies:
+                    match = _REQUIREMENT_LINE.match(specification)
+                    is_pinned = bool(match and _pinned_requirement_version(match.group("spec")))
+                    add_direct("python", _dependency_name(specification), is_pinned)
+        elif name == "package.json":
+            try:
+                parsed = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                parsed = {}
+            if isinstance(parsed, dict):
+                package_values = {}
+                for section in ("dependencies", "devDependencies", "optionalDependencies"):
+                    values = parsed.get(section, {})
+                    if isinstance(values, dict):
+                        package_values.update(values)
+                if package_values:
+                    manifests.add(relative)
+                    for dependency_name, specification in package_values.items():
+                        add_direct("node", str(dependency_name), _package_spec_is_pinned(specification))
+        elif name == "package-lock.json":
+            try:
+                parsed = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                parsed = {}
+            if isinstance(parsed, dict) and isinstance(parsed.get("packages"), dict):
+                manifests.add(relative)
+                packages = parsed["packages"]
+                root = packages.get("", {})
+                if isinstance(root, dict):
+                    for section in ("dependencies", "devDependencies", "optionalDependencies"):
+                        values = root.get(section, {})
+                        if isinstance(values, dict):
+                            for dependency_name in values:
+                                add_direct("node", str(dependency_name), True)
+                for package_path, package_info in packages.items():
+                    if not package_path or "node_modules/" not in package_path or not isinstance(package_info, dict):
+                        continue
+                    dependency_name = package_path.rsplit("node_modules/", 1)[-1]
+                    add_transitive("node", dependency_name)
+        elif name == "cargo.toml":
+            declared, _, names, pinned_names, valid = _cargo_dependency_status(path)
+            if valid and declared:
+                manifests.add(relative)
+                for dependency_name in names:
+                    add_direct("cargo", dependency_name, dependency_name in pinned_names)
+        elif name == "cargo.lock":
+            package_names = _cargo_lock_package_names(path)
+            if package_names:
+                manifests.add(relative)
+                for dependency_name in package_names:
+                    add_transitive("cargo", dependency_name)
+
+    vulnerabilities: list[str] = []
+    database_name = workspace_config.vulnerability_database or ".worksonmymachine-vulnerabilities.json"
+    database_path = target / database_name
+    if database_path.is_file() and database_path.resolve().is_relative_to(target.resolve()):
+        try:
+            database = json.loads(database_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            database = None
+        if isinstance(database, dict):
+            entries = database.get("vulnerabilities", database)
+            if isinstance(entries, dict):
+                for key in sorted(direct | transitive):
+                    package_name = key.split(":", 1)[-1]
+                    if package_name in entries:
+                        vulnerabilities.append(package_name + ": " + str(entries[package_name]))
+    vulnerability_status = "unavailable"
+    if database_path.is_file():
+        vulnerability_status = "findings" if vulnerabilities else "clear"
+
+    all_dependencies = direct | transitive
+    return DependencyTelemetry(
+        total=len(all_dependencies),
+        direct=len(direct),
+        transitive=len(transitive - direct),
+        pinned=len(pinned & all_dependencies),
+        floating=len(floating - pinned),
+        manifests=sorted(manifests),
+        vulnerability_status=vulnerability_status,
+        vulnerabilities=vulnerabilities,
+    )
+
+
 def _runtime_for(target: Path, nodes: list[FileHashNode]) -> str:
     for name in (".python-version", "runtime.txt"):
         value = _read_text(target / name).strip()
@@ -784,12 +920,14 @@ def run_full_audit(target_path: Path, auto_heal: bool = False) -> AuditReport:
     heal_result: Any = None
     patch: DockerfilePatchResult | None = None
     diffs: list[str] = []
+    dependency_data = dependency_telemetry(target)
     if auto_heal:
         staging_parent = Path(tempfile.mkdtemp(prefix="worksonmymachine-audit-"))
         staged = staging_parent / "target"
         try:
             heal_result = heal_repository(target, staged)
             after = generate_certificate(staged)
+            dependency_data = dependency_telemetry(staged)
             diffs = list(heal_result.unified_diffs)
             if _dockerfile_paths(target):
                 patch_stage = staging_parent / "docker-patch"
@@ -821,11 +959,13 @@ def run_full_audit(target_path: Path, auto_heal: bool = False) -> AuditReport:
         unified_diffs=diffs,
         compiler_diagnostics=diagnostics,
         timeline=_timeline(before, after, heal_result),
+        dependency_telemetry=dependency_data,
     )
 
 
 __all__ = [
     "calculate_dependency_lock_score",
+    "dependency_telemetry",
     "compare_certificates",
     "compute_file_hash",
     "compute_merkle_root",

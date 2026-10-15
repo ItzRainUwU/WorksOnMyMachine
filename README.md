@@ -150,6 +150,23 @@ The web UI serves local HTML, CSS, JavaScript, and custom inline SVG graphics wi
 - **Opt-in staged build verification:** The Build & Deploy drawer can run Docker against a temporary healed copy and reports passed, failed, blocked, or timed-out status without mutating source.
 - **Local audit history and issue evidence:** Completed runs persist in browser storage, and each finding opens bounded source context, remediation, and raw evidence.
 
+### Workspace configuration
+
+The optional `.worksonmymachine.toml` file controls workspace-relative targets,
+ignored directories, and staged verification commands without putting machine
+paths or secrets into source code:
+
+```toml
+target_paths = ["workspace"]
+ignore_paths = ["vendor", "generated"]
+build_command = "docker build -t api-service ."
+test_command = "pytest -q"
+runtime = "python:3.11"
+```
+
+Build and test commands are executed only when the user explicitly starts
+staged verification, and only from the temporary copy.
+
 ### CLI Commands
 
 ```bash

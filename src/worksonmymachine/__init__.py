@@ -7,6 +7,7 @@ __version__ = "0.1.0"
 from .models import (
     AuditReport,
     BuildVerification,
+    DependencyTelemetry,
     CompilerDiagnostic,
     DockerfilePatchResult,
     FileHashNode,
@@ -20,6 +21,7 @@ from .scanner import heal_repository, readiness_score, scan_repository
 from .apt_healer import analyze_log_hybrid, heal_dockerfile, parse_compiler_log
 from .repro_hash import (
     calculate_dependency_lock_score,
+    dependency_telemetry,
     compare_certificates,
     compute_file_hash,
     compute_merkle_root,
@@ -30,6 +32,7 @@ from .repro_hash import (
 __all__ = [
     "AuditReport",
     "BuildVerification",
+    "DependencyTelemetry",
     "CompilerDiagnostic",
     "DockerfilePatchResult",
     "FileHashNode",
@@ -45,6 +48,7 @@ __all__ = [
     "heal_dockerfile",
     "parse_compiler_log",
     "calculate_dependency_lock_score",
+    "dependency_telemetry",
     "compare_certificates",
     "compute_file_hash",
     "compute_merkle_root",

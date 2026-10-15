@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
 from . import __version__
-from .config import PROJECT_ROOT, settings
+from .config import PROJECT_ROOT, settings, workspace_config
 from .apt_healer import analyze_log_hybrid, heal_dockerfile
 from .models import (
     CompilerDiagnostic,
@@ -147,7 +147,7 @@ def health() -> dict[str, str]:
 
 
 @app.get("/api/v1/targets")
-def targets(scope: str = "sandbox") -> dict[str, list[str]]:
+def targets(scope: str = "sandbox") -> dict[str, object]:
     """List configured fixtures or repository candidates inside the workspace.
 
     The default response remains the stable fixture list used by existing API
@@ -170,7 +170,7 @@ def targets(scope: str = "sandbox") -> dict[str, list[str]]:
         raise HTTPException(status_code=400, detail="scope must be sandbox or workspace")
 
     workspace = PROJECT_ROOT.resolve()
-    candidates = ["workspace"]
+    candidates = list(workspace_config.target_paths) or ["workspace"]
     if sandbox.is_dir():
         candidates.extend(
             "demo_targets/" + directory.name
@@ -182,7 +182,10 @@ def targets(scope: str = "sandbox") -> dict[str, list[str]]:
             continue
         if _looks_like_repository(directory):
             candidates.append(directory.name)
-    return {"targets": sorted(set(candidates))}
+    return {
+        "targets": sorted(set(candidates)),
+        "default_target": workspace_config.target_paths[0] if workspace_config.target_paths else "workspace",
+    }
 
 
 def _looks_like_repository(directory: Path) -> bool:
@@ -467,18 +470,24 @@ def verify_build(request: BuildVerificationRequest) -> BuildVerification:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    configured_build = workspace_config.build_command
+    configured_test = workspace_config.test_command
     dockerfile_name = "Dockerfile" if (target_path / "Dockerfile").is_file() else "Dockerfile.broken"
-    display_command = [
-        "docker",
-        "build",
-        "--progress=plain",
-        "--file",
-        dockerfile_name,
-        "--tag",
-        "<verification-image>",
-        "<staged-context>",
-    ]
-    if not (target_path / dockerfile_name).is_file():
+    display_command = (
+        [configured_build] + ([configured_test] if configured_test else [])
+        if configured_build
+        else [
+            "docker",
+            "build",
+            "--progress=plain",
+            "--file",
+            dockerfile_name,
+            "--tag",
+            "<verification-image>",
+            "<staged-context>",
+        ]
+    )
+    if not configured_build and not (target_path / dockerfile_name).is_file():
         return _verification_response(
             verification_id=verification_id,
             target=request.target,
@@ -488,7 +497,7 @@ def verify_build(request: BuildVerificationRequest) -> BuildVerification:
             detail="No Dockerfile or Dockerfile.broken was found in the selected target.",
             auto_heal=request.auto_heal,
         )
-    if shutil.which("docker") is None:
+    if not configured_build and shutil.which("docker") is None:
         return _verification_response(
             verification_id=verification_id,
             target=request.target,
@@ -523,17 +532,48 @@ def verify_build(request: BuildVerificationRequest) -> BuildVerification:
                 dirs_exist_ok=True,
                 ignore=shutil.ignore_patterns(*_BUILD_IGNORED_DIRECTORIES),
             )
-        process = subprocess.run(
-            actual_command,
-            cwd=staging,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=request.timeout_seconds,
-            check=False,
-        )
-        output = (process.stdout or "") + ("\n" + process.stderr if process.stderr else "")
+        if configured_build:
+            process = subprocess.run(
+                configured_build,
+                cwd=staging,
+                shell=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=request.timeout_seconds,
+                check=False,
+            )
+            output = (process.stdout or "") + ("\n" + process.stderr if process.stderr else "")
+            if process.returncode == 0 and configured_test:
+                test_process = subprocess.run(
+                    configured_test,
+                    cwd=staging,
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=request.timeout_seconds,
+                    check=False,
+                )
+                output += ("\n[test]\n" + (test_process.stdout or "")) + ("\n" + test_process.stderr if test_process.stderr else "")
+                process = test_process
+        else:
+            process = subprocess.run(
+                actual_command,
+                cwd=staging,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=request.timeout_seconds,
+                check=False,
+            )
+            output = (process.stdout or "") + ("\n" + process.stderr if process.stderr else "")
+        detail_prefix = "Configured staged build" if configured_build else "Staged Docker build"
+        if workspace_config.runtime:
+            detail_prefix += " (runtime hint: " + workspace_config.runtime + ")"
         return _verification_response(
             verification_id=verification_id,
             target=request.target,
@@ -542,7 +582,7 @@ def verify_build(request: BuildVerificationRequest) -> BuildVerification:
             command=display_command,
             exit_code=process.returncode,
             output=output,
-            detail="Staged Docker build completed." if process.returncode == 0 else "Staged Docker build exited with a non-zero status.",
+            detail=detail_prefix + " completed." if process.returncode == 0 else detail_prefix + " exited with a non-zero status.",
             auto_heal=request.auto_heal,
         )
     except subprocess.TimeoutExpired as exc:
@@ -554,7 +594,7 @@ def verify_build(request: BuildVerificationRequest) -> BuildVerification:
             started_at=started_at,
             command=display_command,
             output=output,
-            detail=f"Docker build exceeded the {request.timeout_seconds}-second timeout.",
+            detail=f"Staged build exceeded the {request.timeout_seconds}-second timeout.",
             auto_heal=request.auto_heal,
         )
     except (OSError, ValueError) as exc:
@@ -569,7 +609,7 @@ def verify_build(request: BuildVerificationRequest) -> BuildVerification:
             auto_heal=request.auto_heal,
         )
     finally:
-        if shutil.which("docker") is not None:
+        if not configured_build and shutil.which("docker") is not None:
             subprocess.run(
                 ["docker", "image", "rm", "--force", tag],
                 capture_output=True,

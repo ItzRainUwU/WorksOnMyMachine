@@ -200,6 +200,19 @@ class ReproducibilityCertificate(_StrictModel):
         return self.root_hash
 
 
+class DependencyTelemetry(_StrictModel):
+    """Local manifest and lockfile counts for the active target."""
+
+    total: int = Field(default=0, ge=0)
+    direct: int = Field(default=0, ge=0)
+    transitive: int = Field(default=0, ge=0)
+    pinned: int = Field(default=0, ge=0)
+    floating: int = Field(default=0, ge=0)
+    manifests: list[str] = Field(default_factory=list)
+    vulnerability_status: str = "unavailable"
+    vulnerabilities: list[str] = Field(default_factory=list)
+
+
 class AuditReport(_StrictModel):
     """Complete Phase 1 contract for a target audit."""
 
@@ -219,6 +232,7 @@ class AuditReport(_StrictModel):
     unified_diffs: list[str] = Field(default_factory=list)
     compiler_diagnostics: list[CompilerDiagnostic] = Field(default_factory=list)
     timeline: list[dict[str, Any]] = Field(default_factory=list)
+    dependency_telemetry: DependencyTelemetry = Field(default_factory=DependencyTelemetry)
 
     @property
     def timeline_data(self) -> list[dict[str, Any]]:

@@ -264,11 +264,14 @@
   }
 
   function dependencyMetrics(report, certificate) {
-    var source = (report && report.dependency_metrics) || certificate.dependency_metrics || {};
+    var source = (report && (report.dependency_telemetry || report.dependency_metrics)) || certificate.dependency_metrics || {};
     return {
       total: source.total == null ? "--" : source.total,
       direct: source.direct == null ? "--" : source.direct,
       transitive: source.transitive == null ? "--" : source.transitive,
+      pinned: source.pinned == null ? "--" : source.pinned,
+      floating: source.floating == null ? "--" : source.floating,
+      vulnerabilityStatus: source.vulnerability_status || "unavailable",
     };
   }
 
@@ -285,6 +288,7 @@
     setText("dep-total", metrics.total);
     setText("dep-direct", metrics.direct);
     setText("dep-transitive", metrics.transitive);
+    setText("dependency-pin-status", "Pinned " + metrics.pinned + " / Floating " + metrics.floating + " / Vuln DB " + metrics.vulnerabilityStatus);
     setText("root-hash", certificate.root_hash ? truncate(certificate.root_hash, 19, 0) : "pending");
     setText("root-meta", certificate.root_hash ? "Immutable build fingerprint" : "Immutable build fingerprint pending");
     var certified = Boolean(certificate.is_cleanroom_certified || certificate.verified);
@@ -456,9 +460,19 @@
     output.textContent = (result.detail || "") + (result.output ? "\n\n" + result.output : "");
   }
 
+  function issueDiff(issue) {
+    var report = state.report;
+    if (!report || !issue || !issue.file_path) return "";
+    var path = String(issue.file_path).replace(/^\.\//, "");
+    return safeArray(report.unified_diffs).find(function (diff) {
+      return diff.indexOf("a/" + path) >= 0 || diff.indexOf("b/" + path) >= 0;
+    }) || "";
+  }
+
   function renderIssueDetail(issue) {
     if (!issue) return;
     setText("issue-detail-title", issue.message || issue.issue_id || "Issue detail");
+    setText("issue-detail-id", issue.issue_id || "unclassified");
     setText("issue-detail-severity", String(issue.severity || "medium").toUpperCase());
     setText("issue-detail-category", issue.category || "unclassified");
     setText("issue-detail-location", issueLocation(issue));
@@ -471,9 +485,13 @@
       status.classList.toggle("status-fixed", fixed);
       status.classList.toggle("status-open", !fixed);
     }
+    setText("issue-detail-state", !state.report || !state.report.after_certificate ? "Not evaluated; this was a scan-only result." : fixed ? "Fixed in the staged copy; no matching post-heal finding remains." : "Still present after auto-heal; remains OPEN.");
     var evidence = byId("issue-detail-evidence");
     var evidenceItems = safeArray(issue.evidence);
     if (evidence) evidence.innerHTML = evidenceItems.length ? evidenceItems.map(function (item) { return "<li>" + escapeHtml(item) + "</li>"; }).join("") : "<li>No raw evidence recorded.</li>";
+    var diff = byId("issue-detail-diff");
+    var diffValue = issueDiff(issue);
+    if (diff) diff.innerHTML = diffValue ? diffText(diffValue) : "No file diff recorded for this issue.";
     var source = byId("issue-detail-source");
     if (source) source.textContent = issue.file_path ? "Loading source context..." : "This finding has no file path context.";
     setDrawerView("issue");
@@ -713,6 +731,7 @@
     try {
       var payload = await request("/api/v1/targets?scope=workspace", { method: "GET" });
       state.targets = safeArray(payload && payload.targets);
+      if (!state.report && state.target === "workspace" && payload && typeof payload.default_target === "string") state.target = payload.default_target;
       var select = byId("target-select");
       if (select) {
         select.replaceChildren();

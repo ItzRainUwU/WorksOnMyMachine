@@ -659,6 +659,15 @@ pre,
   font-weight: 600;
 }
 
+.dependency-pin-status {
+  overflow: hidden;
+  color: #718096;
+  font-family: var(--mono);
+  font-size: 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .kpi-root-card {
   align-items: flex-start;
 }
@@ -1804,6 +1813,15 @@ pre,
   white-space: nowrap;
 }
 
+.issue-detail-grid small {
+  overflow: hidden;
+  color: #718096;
+  font-family: var(--mono);
+  font-size: 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .issue-detail-message {
   margin: 0 0 15px;
   color: #e2e8f0;
@@ -1847,6 +1865,9 @@ pre,
   line-height: 1.6;
   white-space: pre-wrap;
 }
+
+.source-context .diff-add { color: #7af2c2; background: rgba(16, 185, 129, 0.12); }
+.source-context .diff-remove { color: #ff9b9b; background: rgba(239, 68, 68, 0.12); }
 
 .build-verification-card {
   margin-top: 14px;

@@ -1,0 +1,12 @@
+# Workspace-local defaults for the WorksOnMyMachine dashboard.
+# All target paths remain relative to this repository.
+target_paths = ["workspace"]
+ignore_paths = ["vendor", "generated"]
+
+# Optional staged verification commands. Leave unset to use Dockerfile builds.
+# build_command = "docker build -t api-service ."
+# test_command = "pytest -q"
+# runtime = "python:3.11"
+
+# Optional offline vulnerability data file relative to the target repository.
+# vulnerability_database = ".worksonmymachine-vulnerabilities.json"

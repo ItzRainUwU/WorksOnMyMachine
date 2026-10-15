@@ -22,6 +22,7 @@ import tempfile
 from typing import Iterable, Sequence
 
 from .apt_healer import heal_dockerfile
+from .config import workspace_config
 from .models import HealResult, LandmineIssue, SeverityLevel
 
 
@@ -39,7 +40,7 @@ _IGNORED_DIRECTORIES = frozenset(
         "dist",
         "node_modules",
     }
-)
+) | frozenset(Path(path).name for path in workspace_config.ignore_paths)
 
 # These versions are intentionally conservative, known-good versions for the
 # small demo projects.  Unknown packages are reported but left for a human to

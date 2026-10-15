@@ -17,7 +17,12 @@ from worksonmymachine import (
     SeverityLevel,
 )
 from worksonmymachine.app import app
-from worksonmymachine.config import DEFAULT_SANDBOX_DIR, load_settings
+from worksonmymachine.config import (
+    DEFAULT_SANDBOX_DIR,
+    DEFAULT_WORKSPACE_CONFIG,
+    load_settings,
+    load_workspace_config,
+)
 
 
 APP_MODULE = importlib.import_module("worksonmymachine.app")
@@ -183,3 +188,23 @@ def test_staged_build_reports_blocked_without_docker(monkeypatch) -> None:
     body = response.json()
     assert body["status"] == "blocked"
     assert "Docker" in body["detail"]
+
+
+def test_workspace_config_loads_safe_defaults() -> None:
+    configured = load_workspace_config(DEFAULT_WORKSPACE_CONFIG)
+
+    assert configured.target_paths == ("workspace",)
+    assert configured.ignore_paths == ("vendor", "generated")
+    assert configured.build_command is None
+
+
+def test_audit_includes_dependency_telemetry() -> None:
+    response = TestClient(app).post(
+        "/api/v1/audit",
+        json={"target": "demo_targets/nightmare_ml_service", "auto_heal": False},
+    )
+
+    assert response.status_code == 200
+    telemetry = response.json()["dependency_telemetry"]
+    assert telemetry["total"] >= telemetry["direct"]
+    assert telemetry["manifests"]

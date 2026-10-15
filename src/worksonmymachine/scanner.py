@@ -836,7 +836,7 @@ def _repair_source_file(target: Path, path: Path) -> tuple[str, str]:
         replacements.extend(_python_import_replacements(target, path, before))
     elif path.suffix.lower() in _JS_SUFFIXES:
         replacements.extend(_js_import_replacements(path, before))
-    if path.suffix.lower() in _SOURCE_SUFFIXES:
+    if path.suffix.lower() in _SOURCE_SUFFIXES | _CONFIG_SUFFIXES:
         replacements.extend(_path_replacements(before))
     after = _apply_replacements(before, replacements)
     if after != before:
@@ -1045,7 +1045,7 @@ def heal_repository(target_path: Path, output_path: Path | None = None) -> HealR
     for path in _iter_files(output):
         relative = _relative(output, path)
         before = after = ""
-        if path.suffix.lower() in _SOURCE_SUFFIXES:
+        if path.suffix.lower() in _SOURCE_SUFFIXES | _CONFIG_SUFFIXES:
             before, after = _repair_source_file(output, path)
         elif path.suffix.lower() == ".sh":
             before, after = _repair_shell(path)

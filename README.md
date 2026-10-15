@@ -69,8 +69,25 @@ Run the API locally from the repository root:
 python -m uvicorn --app-dir src worksonmymachine.app:app --host 0.0.0.0 --port 8000
 ```
 
-Then visit `http://127.0.0.1:8000/health` or  
+Then visit `http://127.0.0.1:8000/health` or
 `http://127.0.0.1:8000/api/v1/targets`.
+
+## Scan and heal a target
+
+Phase 2 scans imports, paths, shell metadata, environment drift, and
+dependency pins without executing target code. Healing always operates on a
+copy in a temporary staging directory and returns unified diffs; the original
+fixture is never overwritten.
+
+```bash
+curl --request POST http://127.0.0.1:8000/api/v1/scan \
+  --header 'Content-Type: application/json' \
+  --data '{"target":"nightmare_ml_service"}'
+
+curl --request POST http://127.0.0.1:8000/api/v1/heal \
+  --header 'Content-Type: application/json' \
+  --data '{"target":"case_sensitive_webapp"}'
+```
 
 ## Docker build and run
 

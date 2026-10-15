@@ -2,6 +2,9 @@
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "-ra"
+filterwarnings = [
+    "ignore::DeprecationWarning:starlette.testclient",
+]
 
 [tool.ruff]
 line-length = 88

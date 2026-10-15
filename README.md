@@ -50,8 +50,8 @@ python -m pip install --upgrade pip
 python -m pip install --requirement requirements.txt
 ```
 
-The direct dependencies are pinned in `requirements.txt`; the matching  
-reviewable lock/constraints companion is `requirements.lock`. Copy the safe  
+The direct dependencies are pinned in `requirements.txt`; the matching
+reviewable lock/constraints companion is `requirements.lock`. Copy the safe
 configuration template only if you need to override defaults:
 
 ```bash
@@ -59,6 +59,11 @@ cp .env.example .env
 ```
 
 No API keys are needed for the Phase 1 service or tests.
+
+The Phase 3 compiler parser is deterministic and offline-first. `LLM_API_KEY`
+is optional; when configured, the hybrid analyzer may enrich the local result
+through the bounded OpenAI-compatible hook, but package recommendations always
+start with the local rule engine.
 
 ## Run
 
@@ -89,12 +94,24 @@ curl --request POST http://127.0.0.1:8000/api/v1/heal \
   --data '{"target":"case_sensitive_webapp"}'
 ```
 
+Parse a captured compiler log and harden a Dockerfile:
+
+```bash
+curl --request POST http://127.0.0.1:8000/api/v1/parse-log \
+  --header 'Content-Type: application/json' \
+  --data '{"target":"rust_crypto_worker"}'
+
+curl --request POST http://127.0.0.1:8000/api/v1/heal-dockerfile \
+  --header 'Content-Type: application/json' \
+  --data '{"target":"nightmare_ml_service"}'
+```
+
 ## Docker build and run
 
 ```bash
 ```
 
-The image uses `python:3.11.9-slim`, installs the pinned requirements, runs as  
+The image uses `python:3.11.9-slim`, installs the pinned requirements, runs as
 the non-root `appuser`, and exposes port `8000`.
 
 ## Test
@@ -112,29 +129,29 @@ Equivalent direct invocation:
 python -m pytest
 ```
 
-The foundation suite validates every public Pydantic schema, relative-path  
-safety, safe environment defaults, and both initial API endpoints. It does not  
+The foundation suite validates every public Pydantic schema, relative-path
+safety, safe environment defaults, and both initial API endpoints. It does not
 make network calls or require external credentials.
 
 ## Phase 1 demo targets
 
-- `demo_targets/nightmare_ml_service/` — Windows paths, a missing model-bucket  
-  environment variable, CRLF shell input, an unpinned Python image, and native  
+- `demo_targets/nightmare_ml_service/` — Windows paths, a missing model-bucket
+  environment variable, CRLF shell input, an unpinned Python image, and native
   ML/PostgreSQL runtime failures.
-- `demo_targets/case_sensitive_webapp/` — Python and JavaScript import casing  
-  that appears to work on case-insensitive filesystems but fails on Linux, plus  
+- `demo_targets/case_sensitive_webapp/` — Python and JavaScript import casing
+  that appears to work on case-insensitive filesystems but fails on Linux, plus
   unpinned Python dependencies.
-- `demo_targets/rust_crypto_worker/` — native `libffi`/OpenSSL header failures,  
+- `demo_targets/rust_crypto_worker/` — native `libffi`/OpenSSL header failures,
   a missing Cargo toolchain scenario, and an intentionally stale lockfile.
 
-Each target contains a simulated `build_error.log`. The fixtures are evidence  
-for future scanner and healer phases; they are not expected to pass their own  
+Each target contains a simulated `build_error.log`. The fixtures are evidence
+for future scanner and healer phases; they are not expected to pass their own
 builds in Phase 1.
 
 ## Reproducibility policy
 
-All runtime inputs needed to rebuild the Phase 1 service live in this  
-repository. Paths are resolved from `Path(__file__).resolve().parent` and  
-project-relative descendants; no workstation-specific absolute path is stored  
-in the application. Secrets belong in ignored `.env` files and are never  
+All runtime inputs needed to rebuild the Phase 1 service live in this
+repository. Paths are resolved from `Path(__file__).resolve().parent` and
+project-relative descendants; no workstation-specific absolute path is stored
+in the application. Secrets belong in ignored `.env` files and are never
 committed.

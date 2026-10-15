@@ -2,13 +2,21 @@
 
 from collections import Counter
 from pathlib import Path
+import shutil
+import tempfile
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from . import __version__
 from .config import PROJECT_ROOT, settings
-from .models import HealResult, LandmineIssue
+from .apt_healer import analyze_log_hybrid, heal_dockerfile
+from .models import (
+    CompilerDiagnostic,
+    DockerfilePatchResult,
+    HealResult,
+    LandmineIssue,
+)
 from .scanner import heal_repository, readiness_score, scan_repository
 
 
@@ -34,6 +42,36 @@ class ScanResponse(BaseModel):
     issues: list[LandmineIssue]
     category_breakdown: dict[str, int]
     readiness_score: float
+
+
+class ParseLogRequest(BaseModel):
+    """Either a target name or raw compiler output, but never both."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=False)
+
+    target: str | None = None
+    log_text: str | None = None
+
+
+class ParseLogResponse(BaseModel):
+    """Offline-first compiler analysis response."""
+
+    target: str | None = None
+    diagnostics: list[CompilerDiagnostic]
+    apt_packages: list[str]
+    apt_install_command: str
+    root_cause_summary: str
+    llm_used: bool
+
+
+class DockerfileHealRequest(BaseModel):
+    """A target-backed or fully in-memory Dockerfile healing request."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=False)
+
+    target: str | None = None
+    dockerfile_content: str | None = None
+    log_text: str | None = None
 
 
 @app.get("/health")
@@ -115,3 +153,85 @@ def heal(request: TargetRequest) -> HealResult:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return result
+
+
+def _apt_install_command(packages: list[str]) -> str:
+    if not packages:
+        return ""
+    return (
+        "apt-get update && apt-get install -y --no-install-recommends "
+        + " ".join(packages)
+    )
+
+
+@app.post("/api/v1/parse-log", response_model=ParseLogResponse)
+def parse_log(request: ParseLogRequest) -> ParseLogResponse:
+    """Parse a target build log or raw compiler output without network access."""
+
+    if bool(request.target) == bool(request.log_text):
+        raise HTTPException(
+            status_code=400,
+            detail="provide exactly one of target or log_text",
+        )
+    target_name: str | None = None
+    log_text = request.log_text or ""
+    if request.target:
+        try:
+            target_path = _resolve_target(request.target)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        log_path = target_path / "build_error.log"
+        if not log_path.is_file():
+            raise HTTPException(status_code=404, detail="target has no build_error.log")
+        try:
+            log_text = log_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise HTTPException(status_code=400, detail="build log is unreadable") from exc
+        target_name = request.target
+
+    analysis = analyze_log_hybrid(log_text)
+    return ParseLogResponse(
+        target=target_name,
+        diagnostics=analysis.diagnostics,
+        apt_packages=analysis.apt_packages,
+        apt_install_command=_apt_install_command(analysis.apt_packages),
+        root_cause_summary=analysis.root_cause_summary,
+        llm_used=analysis.llm_used,
+    )
+
+
+@app.post("/api/v1/heal-dockerfile", response_model=DockerfilePatchResult)
+def heal_dockerfile_endpoint(request: DockerfileHealRequest) -> DockerfilePatchResult:
+    """Stage and harden a target Dockerfile or an in-memory Dockerfile."""
+
+    has_target = bool(request.target)
+    has_custom = request.dockerfile_content is not None
+    if has_target == has_custom:
+        raise HTTPException(
+            status_code=400,
+            detail="provide exactly one of target or dockerfile_content",
+        )
+
+    if has_target:
+        try:
+            target_path = _resolve_target(request.target or "")
+            return heal_dockerfile(target_path)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    input_path = Path(tempfile.mkdtemp(prefix="worksonmymachine-api-docker-input-"))
+    try:
+        (input_path / "Dockerfile.broken").write_text(
+            request.dockerfile_content or "",
+            encoding="utf-8",
+        )
+        if request.log_text is not None:
+            (input_path / "build_error.log").write_text(
+                request.log_text,
+                encoding="utf-8",
+            )
+        return heal_dockerfile(input_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        shutil.rmtree(input_path, ignore_errors=True)

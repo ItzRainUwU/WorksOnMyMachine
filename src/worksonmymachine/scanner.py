@@ -21,6 +21,7 @@ import stat
 import tempfile
 from typing import Iterable, Sequence
 
+from .apt_healer import heal_dockerfile
 from .models import HealResult, LandmineIssue, SeverityLevel
 
 
@@ -1068,6 +1069,27 @@ def heal_repository(target_path: Path, output_path: Path | None = None) -> HealR
         # unified diff just like every other generated repair.
         if env_before != env_after:
             changed_files[".env.example"] = (env_before, env_after)
+
+    dockerfile_names = {"dockerfile", "dockerfile.broken"}
+    dockerfile = next(
+        (
+            path
+            for path in _iter_files(output)
+            if path.name.lower() in dockerfile_names
+        ),
+        None,
+    )
+    if dockerfile is not None:
+        docker_stage = Path(tempfile.mkdtemp(prefix="worksonmymachine-docker-stage-"))
+        try:
+            docker_result = heal_dockerfile(output, docker_stage)
+            docker_before = docker_result.before_content
+            docker_after = docker_result.after_content
+            existing_before = changed_files.get(docker_result.source_path, (docker_before, ""))[0]
+            dockerfile.write_text(docker_after, encoding="utf-8", newline="")
+            changed_files[docker_result.source_path] = (existing_before, docker_after)
+        finally:
+            shutil.rmtree(docker_stage, ignore_errors=True)
 
     after_issues = scan_repository(output)
     after_score = readiness_score(after_issues)

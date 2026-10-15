@@ -105,10 +105,21 @@ def filter_issues(
     return active, suppressed
 
 
-def report_with_issues(report: AuditReport, issues: list[LandmineIssue]) -> AuditReport:
+def report_with_issues(
+    report: AuditReport,
+    issues: list[LandmineIssue],
+    *,
+    suppressed_count: int | None = None,
+    baseline_applied: bool | None = None,
+) -> AuditReport:
     """Return an export-safe report copy with effective issue rows."""
 
-    return report.model_copy(update={"issues": issues})
+    update: dict[str, object] = {"issues": issues}
+    if suppressed_count is not None:
+        update["suppressed_issue_count"] = suppressed_count
+    if baseline_applied is not None:
+        update["baseline_applied"] = baseline_applied
+    return report.model_copy(update=update)
 
 
 def report_json(report: AuditReport) -> str:

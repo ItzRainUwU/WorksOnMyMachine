@@ -9,6 +9,7 @@
     analysis: null,
     comparison: null,
     buildVerification: null,
+    newOnly: false,
     history: [],
     selectedHistoryId: null,
     auditWasAutoHealed: false,
@@ -114,6 +115,7 @@
       target: state.target,
       scanned_at: report.scanned_at || new Date().toISOString(),
       auto_heal: Boolean(state.auditWasAutoHealed),
+      new_only: Boolean(state.newOnly),
       readiness: readinessScore(report),
       issue_count: displayIssues().length,
       report: report,
@@ -136,6 +138,7 @@
     state.analysis = null;
     state.comparison = null;
     state.auditWasAutoHealed = Boolean(record.auto_heal);
+    state.newOnly = Boolean(record.new_only);
     state.buildVerification = record.build_verification || null;
     var select = byId("target-select");
     if (select) {
@@ -148,6 +151,8 @@
       }
       select.value = state.target;
     }
+    var baselineToggle = byId("new-only-toggle");
+    if (baselineToggle) baselineToggle.checked = state.newOnly;
     renderTargetDescription();
     renderAll();
   }
@@ -765,7 +770,7 @@
     renderAll();
     logEvent((autoHeal ? "auto-heal" : "audit") + " started for " + state.target, "info");
     try {
-      state.report = await request("/api/v1/audit", { method: "POST", body: { target: state.target, auto_heal: Boolean(autoHeal) } });
+      state.report = await request("/api/v1/audit", { method: "POST", body: { target: state.target, auto_heal: Boolean(autoHeal), new_only: Boolean(state.newOnly) } });
       state.analysis = null;
       state.comparison = null;
       state.buildVerification = null;
@@ -990,6 +995,10 @@
     on("download-patch-button", "click", function () { exportArtifact("patch"); });
     on("download-sarif-button", "click", function () { exportArtifact("sarif"); });
     on("download-markdown-button", "click", function () { exportArtifact("markdown"); });
+    on("new-only-toggle", "change", function (event) {
+      state.newOnly = Boolean(event.target.checked);
+      if (state.report) runAudit(state.auditWasAutoHealed, false);
+    });
     on("view-file-button", "click", function () { setDrawerView("build"); });
     on("drawer-close", "click", closeDrawer);
     on("terminal-toggle", "click", function () { setDrawerView("reports"); });

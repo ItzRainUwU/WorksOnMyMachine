@@ -233,6 +233,8 @@ class AuditReport(_StrictModel):
     compiler_diagnostics: list[CompilerDiagnostic] = Field(default_factory=list)
     timeline: list[dict[str, Any]] = Field(default_factory=list)
     dependency_telemetry: DependencyTelemetry = Field(default_factory=DependencyTelemetry)
+    suppressed_issue_count: int = Field(default=0, ge=0)
+    baseline_applied: bool = False
 
     @property
     def timeline_data(self) -> list[dict[str, Any]]:

@@ -241,7 +241,7 @@ worksonmymachine scan nightmare_ml_service
 | `POST` | `/api/v1/compare`         | Compare certificate drift between snapshots            |
 | `POST` | `/api/v1/verify-build`    | Opt-in Docker build of an isolated staged copy         |
 | `POST` | `/api/v1/issue-context`   | Return bounded source context for one finding           |
-| `POST` | `/api/v1/audit`           | Run the unified scan, heal, and certification workflow |
+| `POST` | `/api/v1/audit`           | Run the unified scan, heal, certification, suppression, and baseline workflow |
 
 ### Example API Calls
 
@@ -250,6 +250,11 @@ worksonmymachine scan nightmare_ml_service
 curl --request POST http://127.0.0.1:8000/api/v1/audit \
   --header 'Content-Type: application/json' \
   --data '{"target":"workspace","auto_heal":true}'
+
+# Apply configured suppressions and report only findings newer than the baseline
+curl --request POST http://127.0.0.1:8000/api/v1/audit \
+  --header 'Content-Type: application/json' \
+  --data '{"target":"workspace","new_only":true}'
 
 # Audit another repository located below this workspace
 curl --request POST http://127.0.0.1:8000/api/v1/audit \
@@ -261,6 +266,11 @@ curl --request POST http://127.0.0.1:8000/api/v1/parse-log \
   --header 'Content-Type: application/json' \
   --data '{"log_text":"fatal error: Python.h: No such file or directory"}'
 ```
+
+API audits always apply configured suppressions. Set `new_only` to `true` to
+also apply the configured baseline; the response reports `suppressed_issue_count`
+and `baseline_applied` so dashboard and API consumers can show the same policy
+state as the CLI.
 
 ---
 

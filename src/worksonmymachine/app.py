@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from . import __version__
 from .config import PROJECT_ROOT, settings, workspace_config
 from .apt_healer import analyze_log_hybrid, heal_dockerfile
+from .exports import filter_issues, load_baseline, report_with_issues
 from .models import (
     CompilerDiagnostic,
     BuildVerification,
@@ -117,6 +118,7 @@ class AuditRequest(BaseModel):
 
     target: str = Field(min_length=1)
     auto_heal: bool = False
+    new_only: bool = False
 
 
 class BuildVerificationRequest(BaseModel):
@@ -668,6 +670,20 @@ def audit(request: AuditRequest) -> AuditReport:
 
     try:
         target_path = _resolve_target(request.target)
-        return run_full_audit(target_path, auto_heal=request.auto_heal)
+        report = run_full_audit(target_path, auto_heal=request.auto_heal)
+        baseline_path = PROJECT_ROOT / workspace_config.baseline_file
+        baseline = load_baseline(baseline_path) if request.new_only else set()
+        effective, suppressed = filter_issues(
+            report.issues,
+            workspace_config,
+            baseline,
+            request.new_only,
+        )
+        return report_with_issues(
+            report,
+            effective,
+            suppressed_count=len(suppressed),
+            baseline_applied=request.new_only,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

@@ -206,7 +206,12 @@ def _run_audit_command(
     if write_baseline_file:
         write_baseline(baseline_file, target, report.issues)
         click.echo(f"Wrote baseline {baseline_file}", err=True)
-    export_report = report_with_issues(report, effective)
+    export_report = report_with_issues(
+        report,
+        effective,
+        suppressed_count=len(suppressed),
+        baseline_applied=new_only,
+    )
     if output_format == "json":
         payload = report_json(export_report)
     elif output_format == "sarif":

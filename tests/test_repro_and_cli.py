@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import json
+import importlib
 import os
 import subprocess
 import sys
@@ -35,6 +36,7 @@ from worksonmymachine.repro_hash import (
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEMO_ROOT = PROJECT_ROOT / "demo_targets"
+APP_MODULE = importlib.import_module("worksonmymachine.app")
 
 
 def test_empty_requirements_lock_cannot_certify_a_target(tmp_path: Path) -> None:
@@ -310,3 +312,32 @@ def test_cli_audit_formats_and_baseline_options(tmp_path: Path) -> None:
     assert baseline.is_file()
     assert new_only_result.exit_code == 0, new_only_result.output
     assert '"issues": []' in new_only_result.output
+
+
+def test_api_audit_applies_configured_suppressions_and_baseline(
+    tmp_path: Path, monkeypatch
+) -> None:
+    raw_report = run_full_audit(DEMO_ROOT / "nightmare_ml_service")
+    baseline = tmp_path / "baseline.json"
+    write_baseline(baseline, "nightmare_ml_service", raw_report.issues)
+    configured = WorkspaceConfig(
+        baseline_file=str(baseline),
+        suppressions=(
+            SuppressionRule(
+                issue_id=raw_report.issues[0].issue_id,
+                reason="Covered by the fixture baseline.",
+            ),
+        ),
+    )
+    monkeypatch.setattr(APP_MODULE, "workspace_config", configured)
+
+    response = TestClient(app).post(
+        "/api/v1/audit",
+        json={"target": "nightmare_ml_service", "new_only": True},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["issues"] == []
+    assert body["suppressed_issue_count"] == len(raw_report.issues)
+    assert body["baseline_applied"] is True

@@ -1,0 +1,21 @@
+case_sensitive_webapp build log (intentionally captured from Linux)
+================================================================
+$ python -m webapp.app
+Traceback (most recent call last):
+  File "backend/webapp/app.py", line 5, in <module>
+    from webapp.Config import settings
+ModuleNotFoundError: No module named 'webapp.Config'
+The file exists as backend/webapp/config.py; import spelling differs only by case.
+
+$ npm run build --prefix frontend
+> case-sensitive-webapp-ui@0.1.0 build
+> node src/main.js
+
+Error [ERR_MODULE_NOT_FOUND]: Cannot find module
+  '/workspace/case_sensitive_webapp/frontend/src/components/navbar.js'
+  imported from /workspace/case_sensitive_webapp/frontend/src/main.js
+Did you mean to import "./components/NavBar.js"?
+Error [ERR_MODULE_NOT_FOUND]: Cannot find module
+  '/workspace/case_sensitive_webapp/frontend/src/lib/apiClient.js'
+  imported from /workspace/case_sensitive_webapp/frontend/src/main.js
+Did you mean to import "./lib/ApiClient.js"?

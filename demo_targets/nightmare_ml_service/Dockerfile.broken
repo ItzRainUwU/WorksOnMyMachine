@@ -1,0 +1,13 @@
+FROM python:latest
+
+USER root
+WORKDIR /opt/nightmare_ml_service
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+
+# Intentionally omitted: gcc, libgl1, and libpq-dev.  The native ML wheels,
+# PostgreSQL client build, and OpenCV runtime therefore fail in this minimal
+# image before the entrypoint can start.
+ENTRYPOINT ["./entrypoint.sh"]

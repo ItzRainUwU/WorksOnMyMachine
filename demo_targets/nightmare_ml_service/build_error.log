@@ -1,0 +1,24 @@
+nightmare_ml_service build log (intentionally captured from the broken image)
+==========================================================================
+Step 4/6 : RUN pip install --no-cache-dir -r requirements.txt
+ ---> Running in 4b0d9c2e1a77
+ERROR: Could not build wheels for scikit-learn, which is required to install pyproject.toml-based projects
+ERROR: command 'gcc' failed: No such file or directory
+      fatal error: Python.h: No such file or directory
+      compilation terminated.
+
+      Error: pg_config executable not found.
+      pg_config is required to build psycopg2 from source.
+
+ImportError: libGL.so.1: cannot open shared object file: No such file or directory
+
+Step 6/6 : ENTRYPOINT ["./entrypoint.sh"]
+ ---> Running in 7c6c7d3e5b11
+/bin/sh: 1: ./entrypoint.sh: Permission denied
+The command '/bin/sh -c ./entrypoint.sh' returned a non-zero code: 126
+
+Traceback (most recent call last):
+  File "/opt/nightmare_ml_service/app.py", line 24, in load_model
+    return model_path.read_bytes()
+ FileNotFoundError: [Errno 2] No such file or directory: 'C:\\Users\\Dev\\models\\weights.bin'
+RuntimeWarning: SECRET_MODEL_BUCKET was not configured; model storage is unavailable

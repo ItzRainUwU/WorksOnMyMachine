@@ -1,0 +1,18 @@
+FROM rust:latest
+
+USER root
+WORKDIR /workspace/rust_crypto_worker
+
+# Python and pkg-config are present, but libffi-dev and libssl-dev are
+# intentionally missing.  The native headers below cannot be discovered.
+RUN apt-get update && apt-get install -y python3 python3-pip pkg-config
+
+COPY Cargo.toml Cargo.lock build.rs ./
+COPY native ./native
+COPY src ./src
+RUN cargo build --release --locked
+
+COPY pyproject.toml requirements.txt worker.py ./
+RUN pip install --no-cache-dir -r requirements.txt
+
+CMD ["python3", "worker.py"]

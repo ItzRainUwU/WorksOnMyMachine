@@ -1,0 +1,11 @@
+# This lockfile is deliberately stale: the broken image invokes Cargo with
+# --locked before the dependency graph has been resolved for this fixture.
+version = 3
+
+[[package]]
+name = "rust_crypto_worker"
+version = "0.1.0"
+dependencies = [
+ "bindgen",
+ "openssl",
+]

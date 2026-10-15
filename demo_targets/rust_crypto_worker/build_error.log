@@ -1,0 +1,36 @@
+rust_crypto_worker build log (intentionally captured from the broken image)
+========================================================================
+Step 5/8 : RUN cargo build --release --locked
+ ---> Running in 1f6a7b8c9d00
+error: the lock file /workspace/rust_crypto_worker/Cargo.lock needs to be updated but --locked was passed
+
+   Compiling rust_crypto_worker v0.1.0 (/workspace/rust_crypto_worker)
+   Compiling bindgen v0.69.5
+error: failed to run custom build command for `bindgen v0.69.5`
+--- stderr
+fatal error: ffi.h: No such file or directory
+
+fatal error: openssl/ssl.h: No such file or directory
+ #include <ffi.h>
+          ^~~~~~~
+compilation terminated.
+
+error: failed to run custom build command for `openssl-sys v0.9.103`
+--- stdout
+Could not find directory of OpenSSL installation, and this `-sys` crate cannot
+proceed without this knowledge. If OpenSSL is installed, set the OPENSSL_DIR
+environment variable during compilation.
+--- stderr
+Package openssl was not found in the pkg-config search path.
+Perhaps you should add the directory containing `openssl.pc` to PKG_CONFIG_PATH.
+
+error: could not compile `openssl-sys` (build script) due to 1 previous error
+error: could not compile `rust_crypto_worker` due to 2 previous errors
+
+Step 7/8 : RUN pip install --no-cache-dir -r requirements.txt
+ERROR: command '/usr/bin/cc' failed with exit code 1
+fatal error: ffi.h: No such file or directory
+
+Step 8/8 : RUN python -m pip install maturin
+error: Cargo, the Rust package manager, is not installed
+note: install cargo and rustc before building the native Python extension

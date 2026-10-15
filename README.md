@@ -1,123 +1,110 @@
-<div align="center">
-
-<img src="https://img.shields.io/badge/tests-44%20passed-10b981?style=for-the-badge&labelColor=050811" alt="44 tests passed">
-<img src="https://img.shields.io/badge/python-3.11.9-06b6d4?style=for-the-badge&labelColor=050811" alt="Python 3.11.9">
-<img src="https://img.shields.io/badge/docker-ready-10b981?style=for-the-badge&labelColor=050811" alt="Docker ready">
-<img src="https://img.shields.io/badge/license-not%20specified-f59e0b?style=for-the-badge&labelColor=050811" alt="License not specified">
-
 # WorksOnMyMachine
 
-### CleanRoom reproducibility for builds that only work on one machine
+**Autonomous Cross-OS (Windows/macOS-to-Linux) Reproducibility Scanner, Compiler `apt` Auto-Healer & Merkle Certification Engine.**
 
-Scan cross-OS landmines, diagnose Linux compiler failures, heal Dockerfiles,
-and produce deterministic SHA-256 evidence without executing untrusted target
-code.
+![Tests Passing](https://img.shields.io/badge/Tests-44%20Passed-10b981?style=for-the-badge&labelColor=050811)
 
-<a href="#quick-start">Quick start</a> ·
-<a href="#the-healing-loop">How it works</a> ·
-<a href="#dashboard">Dashboard</a> ·
-<a href="#api-reference">API</a> ·
-<a href="#development">Development</a>
+![Python Version](https://img.shields.io/badge/Python-3.11.9-06b6d4?style=for-the-badge&labelColor=050811)
 
-</div>
+![CleanRoom Certified](https://img.shields.io/badge/CleanRoom-100%25%20Deterministic-10b981?style=for-the-badge&labelColor=050811)
 
-> WorksOnMyMachine is an offline-first cross-platform reproducibility platform
-> for projects that work on a developer workstation but fail in a clean Linux
-> environment.
+![Docker Ready](https://img.shields.io/badge/Docker-Non--Root%20Slim-3b82f6?style=for-the-badge&labelColor=050811)
 
-It combines portability scanning, compiler-log diagnosis, Dockerfile repair,
-deterministic Merkle hashing, CleanRoom certificates, and a local cyber-
-engineering dashboard. The system is designed to inspect and heal a copy of a
-target repository without modifying the source fixture.
+![Offline First](https://img.shields.io/badge/Mode-100%25%20Offline--First-f59e0b?style=for-the-badge&labelColor=050811)
 
-## What it does
+![License](https://img.shields.io/badge/License-MIT-a855f7?style=for-the-badge&labelColor=050811)
 
-- **Cross-OS landmine scanning** — Finds case-sensitive import mismatches,
-  host-specific paths, CRLF shell scripts, missing shebangs, environment drift,
-  and unpinned dependencies.
-- **Compiler diagnostics** — Parses common Linux failures involving Python
-  headers, PostgreSQL, OpenSSL, libffi, GCC, Rust, CMake, XML, audio libraries,
-  and shared runtime libraries.
-- **Dockerfile auto-healing** — Pins floating base images, injects deterministic
-  Debian/Ubuntu apt layers, enables shell-script execution, and enforces a
-  non-root runtime user.
-- **Deterministic certificates** — Computes normalized SHA-256 file hashes and
-  Merkle roots independent of timestamps, ownership, inode values, or directory
-  enumeration order.
-- **CleanRoom verification** — Combines Linux readiness, dependency-lock
-  evidence, Docker hardening, file hashes, and drift metadata into a certificate.
-- **Self-contained dashboard** — Serves local HTML, CSS, JavaScript, and custom
-  SVG visualizations without CDNs, icon fonts, or external runtime services.
+[Overview](#overview) · [What It Heals](#what-breaks-vs-how-it-heals) · [Architecture](#system-architecture) · [Quickstart](#quickstart) · [Web UI & CLI](#web-dashboard--cli) · [API Reference](#api-reference) · [Demo Targets](#demo-targets) · [Docker & Testing](#docker--testing)
 
-## The healing loop
+---
+
+## Overview
+
+**WorksOnMyMachine** is an offline-first cross-platform reproducibility platform for projects that run on a developer workstation (Windows or macOS) but fail when rebuilt in a clean Linux environment.
+
+Cross-platform builds routinely break due to case-sensitive Linux filesystems (`ext4`), hardcoded Windows backslashes (`\`), `CRLF` shell script line endings, unpinned dependencies, and missing native C/Rust system headers (`Python.h`, `pg_config`, `libGL.so.1`, `ffi.h`).
+
+WorksOnMyMachine solves this automatically without executing untrusted target code:
+
+1. **Scans** repositories statically for cross-OS portability landmines.
+2. **Diagnoses** compiler failure logs and maps missing headers/libraries to exact Debian/Ubuntu `apt` packages.
+3. **Auto-Heals** source imports, paths, shell scripts, `.env.example` drift, and `Dockerfile` layers in an isolated copy-on-write staging sandbox.
+4. **Certifies** deterministic builds using metadata-independent SHA-256 Merkle trees.
+
+> **100% Offline-First & Safe by Design:** WorksOnMyMachine never executes target repository code and never overwrites your source files in-place. All repairs happen in an isolated staging directory and produce standard unified Git diffs.
+
+---
+
+## What Breaks vs. How It Heals
+
+| What Breaks on Clean Linux                                                                                | How WorksOnMyMachine Heals It                                                                                                        |
+| :-------------------------------------------------------------------------------------------------------- | :----------------------------------------------------------------------------------------------------------------------------------- |
+| **`ImportError` on Case-Sensitive Linux (`ext4`)** — `from utils.DataLoader` when file is `dataloader.py` | Enumerates directory entries segment-by-segment without trusting the host OS and rewrites imports to match exact disk casing.        |
+| **Hardcoded Windows & Host Paths** — `C:\Users\Dev\models\weights.bin` or `data\\cache\\items.json`       | Detects OS-specific path literals and normalizes them into portable project-relative POSIX paths.                                    |
+| **Broken Shell Entrypoints (`/bin/sh^M`)** — `entrypoint.sh` has `CRLF` endings or no shebang             | Reads shell bytes directly, converts `CRLF` to `LF`, adds a portable shebang, and applies execute permissions in staging.            |
+| **Native Compiler & Shared Library Failures** — Missing `Python.h`, `ffi.h`, `pg_config`, or `libGL.so.1` | Maps compiler/runtime signatures to deterministic Debian/Ubuntu `apt` packages.                                                      |
+| **Unpinned & Insecure Dockerfiles** — `FROM python:latest` and root execution                             | Pins the base image to `python:3.11.9-slim`, consolidates the `apt` layer, cleans `apt` metadata, and enforces a non-root `appuser`. |
+| **Unpinned Dependencies** — Floating ranges in `requirements.txt` or stale lock evidence                  | Scores dependency determinism and pins packages to known-good deterministic versions.                                                |
+| **Cross-Host Hash Drift** — Different timestamps (`mtime`), inodes, or line endings across OSes           | Normalizes text line endings in memory and computes a metadata-independent SHA-256 Merkle root.                                      |
+
+---
+
+## System Architecture
+
+### The Healing Loop
 
 ```mermaid
 flowchart LR
-    A[Target repository] --> B[Cross-OS scanner]
-    B --> C{Landmines found?}
-    C -->|no| D[Generate certificate]
-    C -->|yes| E[Copy-on-write staging]
-    E --> F[Source and config healer]
-    E --> G[Compiler log parser]
-    G --> H[APT package injector]
-    H --> I[Dockerfile hardener]
-    F --> J[Re-scan staged tree]
+    A[Target Repository] --> B[Cross-OS Scanner]
+    B --> C{Landmines Found?}
+    C -->|No| D[Generate Certificate]
+    C -->|Yes| E[Copy-on-Write Staging]
+    E --> F[Source & Config Healer]
+    E --> G[Compiler Log Parser]
+    G --> H[APT Package Injector]
+    H --> I[Dockerfile Hardener]
+    F --> J[Re-Scan Staged Tree]
     I --> J
     J --> D
-    D --> K[CleanRoom certificate]
+    D --> K[CleanRoom Certificate]
     K --> L[Dashboard, CLI, or API]
 ```
 
-## Architecture
+### Component Stack
 
 ```text
                        +----------------------------------+
-                       | CleanRoom Dashboard               |
-                       | local SVG / CSS / JavaScript      |
+                       | CleanRoom Dashboard              |
+                       | local SVG / CSS / JavaScript     |
                        +----------------+-----------------+
                                         |
                        +----------------v-----------------+
-                       | FastAPI application               |
-                       | scan | parse | heal | certify     |
+                       | FastAPI Application              |
+                       | scan | parse | heal | certify    |
                        | compare | audit                  |
                        +----------------+-----------------+
                                         |
         +-------------------------------+-------------------------------+
         |                               |                               |
-+-------v--------+             +--------v---------+             +---------v--------+
-| Landmine       |             | Compiler and     |             | Reproducibility  |
-| scanner        |             | Docker healer   |             | engine           |
-| AST + heuristics|            | offline rules   |             | hashes + certs   |
++-------v--------+             +--------v---------+             +-------v----------+
+| Landmine       |             | Compiler &       |             | Reproducibility  |
+| Scanner        |             | Docker Healer    |             | Engine           |
+| AST + Rules    |             | Offline APT Map  |             | Merkle + Certs   |
 +----------------+             +------------------+             +------------------+
 ```
 
-The engine never executes target code during inspection. Auto-healing is
-copy-on-write and produces unified diffs for review.
+---
 
-## What breaks, and how it is healed
+## Quickstart
 
-| What breaks on clean Linux | How WorksOnMyMachine heals it |
-| --- | --- |
-| `from utils.DataLoader` while the file is `dataloader.py` | Enumerates every path segment and rewrites import casing without trusting the host filesystem. |
-| `C:\Users\Dev\models\weights.bin` or `data\\cache\\items.json` | Detects host-specific paths and normalizes them to portable project-relative paths. |
-| `entrypoint.sh` has CRLF endings or no shebang | Reads shell bytes directly, converts CRLF to LF, adds a portable shebang, and applies execute permissions in staging. |
-| `Python.h`, `ffi.h`, `pg_config`, or `libGL.so.1` is missing | Maps compiler/runtime signatures to deterministic Debian/Ubuntu apt packages. |
-| `FROM python:latest` and root execution | Pins the image, consolidates the apt layer, cleans apt metadata, and adds a non-root runtime user. |
-| Unpinned `requirements.txt`, Cargo, or lock evidence | Scores dependency determinism and refuses certification when lock evidence is incomplete. |
-| Different line endings or file ordering across hosts | Normalizes text hashing and computes a metadata-independent Merkle root. |
+### Requirements
 
-## Requirements
+- **Python 3.11.9** (pinned in `.python-version` and `runtime.txt`)
+- **Docker** *(optional, for containerized execution)*
 
-- Python **3.11.9**.
-- Docker, optional, for the containerized run.
-- A POSIX shell for the commands below. Windows users can use WSL or translate
-  the activation command for PowerShell.
+### 1. Clone & Install
 
-The runtime is pinned in `.python-version` and `runtime.txt`. Direct Python
-dependencies are pinned in `requirements.txt`; the complete constraints set is
-recorded in `requirements.lock`.
-
-## Quick start
+**Linux / macOS / WSL:**
 
 ```bash
 git clone <repository-url> WorksOnMyMachine
@@ -128,29 +115,40 @@ python -m pip install --requirement requirements.txt
 cp .env.example .env
 ```
 
-The default configuration is safe for local use and requires no API keys. The
-optional `LLM_API_KEY` setting only enables enrichment after the deterministic
-local parser has run; offline operation remains the default.
+**Windows (PowerShell):**
 
-## Run the dashboard and API
-
-```bash
-. .venv/bin/activate
-python -m uvicorn --app-dir src worksonmymachine.app:app \
-  --host 0.0.0.0 --port 8000
+```powershell
+git clone <repository-url> WorksOnMyMachine
+cd WorksOnMyMachine
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install --requirement requirements.txt
+Copy-Item .env.example .env
 ```
 
-Open <http://127.0.0.1:8000/> for the dashboard or <http://127.0.0.1:8000/docs>
-for the interactive OpenAPI reference.
+### 2. Run the Dashboard and API
 
-The dashboard automatically loads the `nightmare_ml_service` demonstration
-target. Use the target selector to inspect the other fixtures, run a scan, or
-run the copy-on-write auto-heal and certification workflow.
+```bash
+python -m uvicorn --app-dir src worksonmymachine.app:app --host 127.0.0.1 --port 8000
+```
 
-## CLI
+- **Interactive Web Dashboard:** `http://127.0.0.1:8000/`
+- **OpenAPI Documentation:** `http://127.0.0.1:8000/docs`
 
-The CLI is available through the module entry point and the packaged console
-script:
+---
+
+## Web Dashboard & CLI
+
+### Self-Contained Cyber-Engineering Dashboard
+
+The web UI serves local HTML, CSS, JavaScript, and custom inline SVG graphics with zero external CDNs or network calls:
+
+- **Animated SVG Radial Gauges:** Live Before-vs-After readiness and dependency lock telemetry.
+- **Cross-OS Landmine Radar:** Filterable issue table with severity badges and POSIX file/line locations.
+- **Compiler-to-APT & Dockerfile Viewer:** Side-by-side and unified diff views for hardened Dockerfiles.
+- **Interactive SVG Merkle Graph:** Visual node-link tree of file SHA-256 digests and downloadable JSON certificates.
+
+### CLI Commands
 
 ```bash
 PYTHONPATH=src python -m worksonmymachine --help
@@ -160,149 +158,95 @@ PYTHONPATH=src python -m worksonmymachine certify nightmare_ml_service --json
 PYTHONPATH=src python -m worksonmymachine heal nightmare_ml_service --json
 ```
 
-When installed as a package, the equivalent command is:
+When installed as a package in your virtual environment, you can also run:
 
 ```bash
 worksonmymachine scan nightmare_ml_service
 ```
 
-## API examples
+---
 
-All target requests use a repository name or a normalized path inside the
-workspace. Source targets are never overwritten.
+## API Reference
 
-### Scan
+| Method | Endpoint                  | Description                                            |
+| :----- | :------------------------ | :----------------------------------------------------- |
+| `GET`  | `/`                       | Serve the local CleanRoom Web Dashboard                |
+| `GET`  | `/health`                 | Service health check                                   |
+| `GET`  | `/api/v1/targets`         | List available demo targets                            |
+| `POST` | `/api/v1/scan`            | Scan repository for cross-OS portability landmines     |
+| `POST` | `/api/v1/parse-log`       | Parse a target or raw compiler error log               |
+| `POST` | `/api/v1/heal`            | Heal source and configuration files in staging         |
+| `POST` | `/api/v1/heal-dockerfile` | Harden a staged `Dockerfile` and inject `apt` packages |
+| `POST` | `/api/v1/certify`         | Generate a deterministic SHA-256 Merkle certificate    |
+| `POST` | `/api/v1/compare`         | Compare certificate drift between snapshots            |
+| `POST` | `/api/v1/audit`           | Run the unified scan, heal, and certification workflow |
+
+### Example API Calls
 
 ```bash
-curl --request POST http://127.0.0.1:8000/api/v1/scan \
+# Run a unified auto-heal audit
+curl --request POST http://127.0.0.1:8000/api/v1/audit \
   --header 'Content-Type: application/json' \
-  --data '{"target":"nightmare_ml_service"}'
-```
+  --data '{"target":"nightmare_ml_service","auto_heal":true}'
 
-### Parse a build log
-
-```bash
-curl --request POST http://127.0.0.1:8000/api/v1/parse-log \
-  --header 'Content-Type: application/json' \
-  --data '{"target":"rust_crypto_worker"}'
-```
-
-Raw compiler output can be submitted instead:
-
-```bash
+# Parse a raw compiler failure string
 curl --request POST http://127.0.0.1:8000/api/v1/parse-log \
   --header 'Content-Type: application/json' \
   --data '{"log_text":"fatal error: Python.h: No such file or directory"}'
 ```
 
-### Audit and certify
+---
 
-```bash
-curl --request POST http://127.0.0.1:8000/api/v1/audit \
-  --header 'Content-Type: application/json' \
-  --data '{"target":"nightmare_ml_service","auto_heal":true}'
+## Demo Targets
 
-curl --request POST http://127.0.0.1:8000/api/v1/certify \
-  --header 'Content-Type: application/json' \
-  --data '{"target":"nightmare_ml_service"}'
-```
+The `demo_targets/` directory contains three broken sample repositories used for automated testing and 1-click demos:
 
-### Available endpoints
+- **`nightmare_ml_service`** — Hardcoded Windows paths (`C:\Users\Dev\...`), backslash path separators, missing `.env.example` keys, `CRLF` shell script without a shebang, an unpinned `python:latest` image running as root, and simulated `Python.h`, `pg_config`, and `libGL.so.1` failures.
+- **`case_sensitive_webapp`** — Python and JavaScript import casing mismatches that work on Windows/macOS but fail on Linux `ext4`, unpinned requirements, and a floating Docker base image.
+- **`rust_crypto_worker`** — Native `libffi` and OpenSSL header failures (`ffi.h`, `openssl/ssl.h`), missing Rust/Cargo toolchain errors, and a broken hybrid build setup.
 
-| Method | Endpoint | Description |
-| --- | --- | --- |
-| `GET` | `/` | Serve the local dashboard |
-| `GET` | `/health` | Service health check |
-| `GET` | `/api/v1/targets` | List available targets |
-| `POST` | `/api/v1/scan` | Scan portability landmines |
-| `POST` | `/api/v1/parse-log` | Parse a target or raw compiler log |
-| `POST` | `/api/v1/heal` | Heal source and configuration files in staging |
-| `POST` | `/api/v1/heal-dockerfile` | Harden a staged Dockerfile |
-| `POST` | `/api/v1/certify` | Generate a deterministic certificate |
-| `POST` | `/api/v1/compare` | Compare certificate drift |
-| `POST` | `/api/v1/audit` | Run the unified audit workflow |
+---
 
-## Docker
+## Docker & Testing
 
-Build and run the production-style image:
+### Build and Run with Docker
 
 ```bash
 docker build --tag worksonmymachine:latest .
 docker run --rm --publish 8000:8000 worksonmymachine:latest
 ```
 
-The image uses `python:3.11.9-slim`, installs the locked requirements, copies
-the application, static dashboard, and demo targets, and runs as the non-root
-`appuser` account.
-
-## Development
-
-Run the complete offline suite:
-
-```bash
-. .venv/bin/activate
-make test
-```
-
-Equivalent direct command:
+### Run the Offline Test Suite
 
 ```bash
 python -m pytest
 ```
 
-The suite covers:
+Or via `Makefile`:
 
-- Pydantic contracts and configuration safety.
-- Windows/macOS-to-Linux portability detection.
-- Compiler-log parsing and apt recommendations.
-- Copy-on-write source and Dockerfile healing.
-- Merkle determinism and certificate drift comparison.
-- CLI behavior and FastAPI integration.
-- Dashboard asset delivery, SVG coverage, and zero-CDN guarantees.
-- Full end-to-end workflows across all demo targets.
-- Rebuildability invariants and source-fixture immutability.
+```bash
+make test
+```
 
-## Demo targets
+---
 
-The `demo_targets/` directory contains intentionally broken, self-contained
-fixtures used by the scanner and tests:
-
-- `nightmare_ml_service` — Windows paths, backslash separators, missing
-  environment documentation, CRLF shell input, an unpinned Python image, and
-  native ML/PostgreSQL/OpenGL failures.
-- `case_sensitive_webapp` — Python and JavaScript import casing mismatches,
-  unpinned requirements, and a floating Docker base image.
-- `rust_crypto_worker` — native libffi/OpenSSL headers, missing Rust toolchain
-  evidence, and a hybrid Rust/Python build.
-
-Each fixture contains a simulated `build_error.log`. Healing always uses a
-temporary staging directory, so these source fixtures remain unchanged.
-
-## Reproducibility and security model
-
-- Merkle roots use normalized text content and POSIX-relative paths.
-- CRLF presence and raw SHA-256 values remain visible in certificate metadata.
-- Filesystem timestamps, ownership, inode values, and enumeration order do not
-  affect the root hash.
-- Target paths are constrained to the workspace by the API and CLI.
-- The scanner does not execute target code or install target dependencies.
-- Dockerfile healing is deterministic and emits a reviewable unified diff.
-- Secrets belong in ignored `.env` files. `.env.example` contains placeholders
-  only.
-
-## Project layout
+## Project Layout
 
 ```text
 src/worksonmymachine/
 ├── app.py          FastAPI application and API routes
 ├── scanner.py      Cross-OS landmine scanner and source healer
-├── apt_healer.py  Compiler parser and Dockerfile apt healer
-├── repro_hash.py  Merkle hashing, certificates, and audit orchestration
+├── apt_healer.py   Compiler parser and Dockerfile apt healer
+├── repro_hash.py   Merkle hashing, certificates, and audit orchestration
 ├── cli.py          Click and Rich command-line interface
-└── static/         Self-contained dashboard and SVG engine
-tests/               Foundation, engine, API, CLI, and UI tests
-demo_targets/        Intentionally broken sample repositories
+└── static/         Self-contained dashboard and custom SVG engine
+tests/              Foundation, scanner, apt, Merkle, CLI, and E2E UI tests
+demo_targets/       Intentionally broken sample repositories
 ```
+
+## License
+
+WorksOnMyMachine is released under the [MIT License](LICENSE).
 
 ## Configuration
 
@@ -318,12 +262,4 @@ LLM_API_KEY=
 LLM_MODEL=gpt-4o-mini
 ```
 
-The deterministic scanner, parser, healer, certificate engine, dashboard, and
-tests work without `LLM_API_KEY` or any network connection.
-
-## License
-
-No license file is currently committed. Before publishing this repository as a
-public open-source project, choose and add an OSI-approved license that matches
-your contribution and distribution policy. Until then, the source remains
-copyrighted by default.
+All core features and tests run 100% offline without `LLM_API_KEY`.

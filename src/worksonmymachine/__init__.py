@@ -9,18 +9,24 @@ from .models import (
     CompilerDiagnostic,
     DockerfilePatchResult,
     FileHashNode,
+    HealResult,
     LandmineIssue,
     ReproducibilityCertificate,
     SeverityLevel,
 )
+from .scanner import heal_repository, readiness_score, scan_repository
 
 __all__ = [
     "AuditReport",
     "CompilerDiagnostic",
     "DockerfilePatchResult",
     "FileHashNode",
+    "HealResult",
     "LandmineIssue",
     "ReproducibilityCertificate",
     "SeverityLevel",
+    "heal_repository",
+    "readiness_score",
+    "scan_repository",
     "__version__",
 ]

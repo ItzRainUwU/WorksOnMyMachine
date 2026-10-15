@@ -126,4 +126,81 @@ class AuditReport(_StrictModel):
     _validate_target = field_validator("target")(_relative_posix_path)
 
 
+class HealResult(_StrictModel):
+    """The deterministic result of healing a copied repository tree."""
+
+    output_path: str = Field(min_length=1)
+    issues_found: int = Field(default=0, ge=0)
+    issues_fixed: int = Field(default=0, ge=0)
+    fixed_issues: list[LandmineIssue] = Field(default_factory=list)
+    remaining_issues: list[LandmineIssue] = Field(default_factory=list)
+    unified_diffs: list[str] = Field(default_factory=list)
+    readiness_score_before: float = Field(ge=0.0, le=100.0)
+    readiness_score_after: float = Field(ge=0.0, le=100.0)
+
+    @property
+    def fixed_count(self) -> int:
+        """Compatibility alias for callers using the short count name."""
+
+        return self.issues_fixed
+
+    @property
+    def remaining_count(self) -> int:
+        """Return the number of issues left in the staged tree."""
+
+        return len(self.remaining_issues)
+
+    @property
+    def before_score(self) -> float:
+        """Compatibility alias for callers using the short score name."""
+
+        return self.readiness_score_before
+
+    @property
+    def after_score(self) -> float:
+        """Compatibility alias for callers using the short score name."""
+
+        return self.readiness_score_after
+
+    @property
+    def before_readiness_score(self) -> float:
+        """Readable alias for callers that prefer the full score name."""
+
+        return self.readiness_score_before
+
+    @property
+    def after_readiness_score(self) -> float:
+        """Readable alias for callers that prefer the full score name."""
+
+        return self.readiness_score_after
+
+    @property
+    def counts(self) -> dict[str, int]:
+        """Return the two headline issue counts as a small mapping."""
+
+        return {"fixed": self.issues_fixed, "remaining": self.remaining_count}
+
+    @property
+    def fixed_issue_count(self) -> int:
+        """Compatibility alias for callers using an explicit count name."""
+
+        return self.issues_fixed
+
+    @property
+    def remaining_issue_count(self) -> int:
+        """Compatibility alias for callers using an explicit count name."""
+
+        return self.remaining_count
+
+    @property
+    def diffs(self) -> dict[str, str]:
+        """Compatibility mapping keyed by the unified diff header path."""
+
+        return {
+            diff.splitlines()[0][4:]: diff
+            for diff in self.unified_diffs
+            if diff.splitlines() and diff.splitlines()[0].startswith("--- ")
+        }
+
+
 FileHashNode.model_rebuild()

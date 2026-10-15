@@ -132,3 +132,19 @@ def test_targets_endpoint_lists_demo_directories() -> None:
         "nightmare_ml_service",
         "rust_crypto_worker",
     ]
+
+
+def test_workspace_targets_expose_current_workspace_and_fixture_paths() -> None:
+    response = TestClient(app).get("/api/v1/targets?scope=workspace")
+
+    assert response.status_code == 200
+    targets = response.json()["targets"]
+    assert "workspace" in targets
+    assert "demo_targets/nightmare_ml_service" in targets
+
+
+def test_workspace_alias_resolves_to_the_project_root() -> None:
+    response = TestClient(app).post("/api/v1/scan", json={"target": "workspace"})
+
+    assert response.status_code == 200
+    assert response.json()["target"] == "workspace"

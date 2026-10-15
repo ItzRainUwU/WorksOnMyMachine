@@ -28,6 +28,18 @@ from .models import HealResult, LandmineIssue, SeverityLevel
 _SOURCE_SUFFIXES = {".py", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}
 _JS_SUFFIXES = {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".json"}
 _CONFIG_SUFFIXES = {".cfg", ".conf", ".ini", ".toml", ".yaml", ".yml"}
+_IGNORED_DIRECTORIES = frozenset(
+    {
+        ".git",
+        ".opencode",
+        ".pytest_cache",
+        ".venv",
+        "__pycache__",
+        "build",
+        "dist",
+        "node_modules",
+    }
+)
 
 # These versions are intentionally conservative, known-good versions for the
 # small demo projects.  Unknown packages are reported but left for a human to
@@ -114,7 +126,7 @@ def _iter_files(root: Path) -> list[Path]:
                 # through a link to a file outside the target tree.
                 if entry.is_symlink():
                     continue
-                if entry.is_dir():
+                if entry.is_dir() and entry.name not in _IGNORED_DIRECTORIES:
                     walk(entry)
                 elif entry.is_file():
                     found.append(entry)
@@ -1024,7 +1036,12 @@ def _copy_tree(target: Path, output: Path) -> None:
         output.unlink()
     output.parent.mkdir(parents=True, exist_ok=True)
     # Preserve links rather than copying data from outside the target tree.
-    shutil.copytree(target, output, symlinks=True)
+    shutil.copytree(
+        target,
+        output,
+        symlinks=True,
+        ignore=shutil.ignore_patterns(*_IGNORED_DIRECTORIES),
+    )
 
 
 def _ensure_requirements_lock(output: Path, changed_files: dict[str, tuple[str, str]]) -> None:

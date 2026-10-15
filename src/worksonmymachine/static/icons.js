@@ -171,6 +171,7 @@
     search: iconFactory('<circle cx="10.7" cy="10.7" r="6.2"/><path d="m15.3 15.3 5 5"/>'),
     filter: iconFactory('<path d="M3.5 5h17L14 12v6l-4 2v-8z"/>'),
     close: iconFactory('<path d="m6 6 12 12M18 6 6 18"/>'),
+    folderOpen: iconFactory('<path d="M3.2 6.2h6l1.8 2h9.8v9.5a2 2 0 0 1-2 2H5.2a2 2 0 0 1-2-2z"/><path d="M3.2 6.2V5a2 2 0 0 1 2-2h4l1.8 2h7.8a2 2 0 0 1 2 2v1.2"/>'),
     chevronRight: iconFactory('<path d="m9 5 7 7-7 7"/>'),
   };
 

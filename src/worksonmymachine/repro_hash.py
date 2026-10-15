@@ -33,10 +33,13 @@ from .scanner import heal_repository, readiness_score, scan_repository
 _EXCLUDED_DIRECTORIES = frozenset(
     {
         ".git",
+        ".opencode",
         "__pycache__",
         ".pytest_cache",
         ".venv",
         "node_modules",
+        "build",
+        "dist",
         ".mypy_cache",
         ".ruff_cache",
     }

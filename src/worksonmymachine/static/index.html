@@ -39,10 +39,16 @@
             <div class="repo-select-wrap">
               <label for="target-select">ACTIVE REPOSITORY</label>
               <select id="target-select" aria-label="Active repository">
-                <option value="nightmare_ml_service">nightmare_ml_service</option>
+                <option value="workspace">Current workspace</option>
               </select>
             </div>
             <span class="select-chevron"><span class="icon-slot" data-icon="chevronDown" data-size="15"></span></span>
+          </div>
+          <button class="button button-dark button-small workspace-target-toggle" id="workspace-target-toggle" type="button"><span class="icon-slot" data-icon="folderOpen" data-size="15"></span>Open workspace target</button>
+          <div class="target-path-popover" id="target-path-popover" aria-hidden="true">
+            <label for="target-path-input">WORKSPACE-RELATIVE TARGET</label>
+            <div class="target-path-row"><input id="target-path-input" type="text" autocomplete="off" spellcheck="false" placeholder="workspace or projects/api-service"><button class="button button-primary button-small" id="use-target-button" type="button">Use target</button></div>
+            <p>Only normalized paths inside this workspace are accepted. Use <code>workspace</code> for the current repository.</p>
           </div>
           <div class="system-status" id="connection-status"><span class="status-dot" id="connection-dot"></span><span id="connection-label">All Systems Operational</span></div>
           <div class="header-actions">

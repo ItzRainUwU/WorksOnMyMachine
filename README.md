@@ -146,6 +146,7 @@ The web UI serves local HTML, CSS, JavaScript, and custom inline SVG graphics wi
 - **Cross-OS Landmine Radar:** Filterable issue table with severity badges and POSIX file/line locations.
 - **Compiler-to-APT & Dockerfile Viewer:** Side-by-side and unified diff views for hardened Dockerfiles.
 - **Interactive SVG Merkle Graph:** Visual node-link tree of file SHA-256 digests and downloadable JSON certificates.
+- **Workspace-relative targets:** The dashboard audits the current repository by default and accepts any normalized repository path inside the workspace, such as `projects/api-service`.
 
 ### CLI Commands
 
@@ -171,7 +172,8 @@ worksonmymachine scan nightmare_ml_service
 | :----- | :------------------------ | :----------------------------------------------------- |
 | `GET`  | `/`                       | Serve the local CleanRoom Web Dashboard                |
 | `GET`  | `/health`                 | Service health check                                   |
-| `GET`  | `/api/v1/targets`         | List available demo targets                            |
+| `GET`  | `/api/v1/targets`         | List configured fixture targets                        |
+| `GET`  | `/api/v1/targets?scope=workspace` | List the current workspace and repository candidates |
 | `POST` | `/api/v1/scan`            | Scan repository for cross-OS portability landmines     |
 | `POST` | `/api/v1/parse-log`       | Parse a target or raw compiler error log               |
 | `POST` | `/api/v1/heal`            | Heal source and configuration files in staging         |
@@ -183,10 +185,15 @@ worksonmymachine scan nightmare_ml_service
 ### Example API Calls
 
 ```bash
-# Run a unified auto-heal audit
+# Run a unified auto-heal audit against the current repository
 curl --request POST http://127.0.0.1:8000/api/v1/audit \
   --header 'Content-Type: application/json' \
-  --data '{"target":"nightmare_ml_service","auto_heal":true}'
+  --data '{"target":"workspace","auto_heal":true}'
+
+# Audit another repository located below this workspace
+curl --request POST http://127.0.0.1:8000/api/v1/audit \
+  --header 'Content-Type: application/json' \
+  --data '{"target":"projects/api-service","auto_heal":true}'
 
 # Parse a raw compiler failure string
 curl --request POST http://127.0.0.1:8000/api/v1/parse-log \

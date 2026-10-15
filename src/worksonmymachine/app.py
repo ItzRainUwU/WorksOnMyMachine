@@ -121,18 +121,59 @@ def health() -> dict[str, str]:
 
 
 @app.get("/api/v1/targets")
-def targets() -> dict[str, list[str]]:
-    """List available demo or user targets using POSIX-relative names only."""
+def targets(scope: str = "sandbox") -> dict[str, list[str]]:
+    """List configured fixtures or repository candidates inside the workspace.
+
+    The default response remains the stable fixture list used by existing API
+    consumers. The dashboard requests ``scope=workspace`` to expose the
+    current workspace and repository-shaped directories without permitting
+    arbitrary host paths.
+    """
 
     sandbox = settings.sandbox_path
-    if not sandbox.is_dir():
-        return {"targets": []}
-    names = sorted(
-        directory.name
-        for directory in sandbox.iterdir()
-        if directory.is_dir() and not directory.name.startswith(".")
-    )
-    return {"targets": names}
+    if scope == "sandbox":
+        if not sandbox.is_dir():
+            return {"targets": []}
+        names = sorted(
+            directory.name
+            for directory in sandbox.iterdir()
+            if directory.is_dir() and not directory.name.startswith(".")
+        )
+        return {"targets": names}
+    if scope != "workspace":
+        raise HTTPException(status_code=400, detail="scope must be sandbox or workspace")
+
+    workspace = PROJECT_ROOT.resolve()
+    candidates = ["workspace"]
+    if sandbox.is_dir():
+        candidates.extend(
+            "demo_targets/" + directory.name
+            for directory in sorted(sandbox.iterdir(), key=lambda item: item.name)
+            if directory.is_dir() and not directory.name.startswith(".")
+        )
+    for directory in sorted(workspace.iterdir(), key=lambda item: item.name):
+        if not directory.is_dir() or directory.name.startswith("."):
+            continue
+        if _looks_like_repository(directory):
+            candidates.append(directory.name)
+    return {"targets": sorted(set(candidates))}
+
+
+def _looks_like_repository(directory: Path) -> bool:
+    """Return whether a workspace directory looks like a project target."""
+
+    markers = {
+        ".git",
+        "Cargo.toml",
+        "Dockerfile",
+        "package.json",
+        "pyproject.toml",
+        "requirements.txt",
+    }
+    try:
+        return any((directory / marker).exists() for marker in markers)
+    except OSError:
+        return False
 
 
 def _resolve_target(value: str) -> Path:
@@ -149,8 +190,10 @@ def _resolve_target(value: str) -> Path:
         or (len(parts[0]) >= 2 and parts[0][1] == ":")
     ):
         raise ValueError("target must be a normalized relative path")
-    relative = Path(*parts)
     workspace = PROJECT_ROOT.resolve()
+    if normalized == "workspace":
+        return workspace
+    relative = Path(*parts)
     sandbox = settings.sandbox_path.resolve()
     candidates = [sandbox / relative, workspace / relative]
     for candidate in candidates:

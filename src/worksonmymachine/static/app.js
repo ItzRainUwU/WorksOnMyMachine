@@ -3,7 +3,7 @@
 
   var icons = window.CleanRoomIcons;
   var state = {
-    target: "nightmare_ml_service",
+    target: "workspace",
     targets: [],
     report: null,
     analysis: null,
@@ -18,6 +18,7 @@
   };
 
   var targetDescriptions = {
+    workspace: "Current WorksOnMyMachine workspace.",
     nightmare_ml_service: "Windows paths, CRLF, native wheels, and Dockerfile drift.",
     case_sensitive_webapp: "Case-folded Python and JavaScript imports on Linux ext4.",
     rust_crypto_worker: "Rust, libffi, OpenSSL, and stale lockfile fixture.",
@@ -90,6 +91,8 @@
     if (select) select.title = description;
     setText("settings-target-description", description);
     setText("build-target", state.target);
+    var pathInput = byId("target-path-input");
+    if (pathInput && document.activeElement !== pathInput) pathInput.value = state.target;
   }
 
   function setConnection(label, tone) {
@@ -244,9 +247,24 @@
   function issueIsFixed(issue) {
     var report = state.report;
     if (!report || !state.auditWasAutoHealed || !report.after_certificate) return false;
+    if (issue && issue.postHeal) return false;
     var remaining = safeArray(report.after_certificate.issues);
-    if (!remaining.length) return Boolean(report.reproducible || report.after_certificate.is_cleanroom_certified);
-    return !remaining.some(function (item) { return item.issue_id === issue.issue_id; });
+    return !remaining.some(function (item) { return issueFingerprint(item) === issueFingerprint(issue); });
+  }
+
+  function issueFingerprint(issue) {
+    return [issue && issue.issue_id, issue && issue.file_path, issue && issue.line_number, issue && issue.message].join("|");
+  }
+
+  function displayIssues() {
+    var report = state.report;
+    var baseline = report ? safeArray(report.issues) : [];
+    if (!report || !state.auditWasAutoHealed || !report.after_certificate) return baseline;
+    var baselineFingerprints = baseline.map(issueFingerprint);
+    var remaining = safeArray(report.after_certificate.issues)
+      .filter(function (issue) { return baselineFingerprints.indexOf(issueFingerprint(issue)) < 0; })
+      .map(function (issue) { return Object.assign({}, issue, { postHeal: true }); });
+    return baseline.concat(remaining);
   }
 
   function issueLocation(issue) {
@@ -279,7 +297,7 @@
 
   function renderIssueList() {
     var list = byId("issue-list");
-    var issues = state.report ? safeArray(state.report.issues) : [];
+    var issues = displayIssues();
     if (!list) return;
     renderIssueCounts(issues);
     var filtered = issues.filter(issueMatches);
@@ -468,6 +486,68 @@
     document.querySelectorAll("[data-view]").forEach(function (button) { button.classList.toggle("is-active", button.getAttribute("data-view") === "dashboard"); });
   }
 
+  function setTargetPopover(open) {
+    var popover = byId("target-path-popover");
+    var toggle = byId("workspace-target-toggle");
+    if (!popover) return;
+    popover.classList.toggle("is-open", open);
+    popover.setAttribute("aria-hidden", open ? "false" : "true");
+    if (toggle) toggle.setAttribute("aria-expanded", open ? "true" : "false");
+    if (open) {
+      var input = byId("target-path-input");
+      if (input) {
+        input.value = state.target;
+        input.focus();
+        input.select();
+      }
+    }
+  }
+
+  function normalizeWorkspaceTarget(value) {
+    var normalized = String(value || "").trim();
+    if (!normalized || normalized === "." || normalized === "./") return "workspace";
+    if (normalized.indexOf("./") === 0) normalized = normalized.slice(2);
+    if (
+      normalized.indexOf("\\") >= 0 ||
+      normalized.indexOf("/") === 0 ||
+      /^[A-Za-z]:/.test(normalized) ||
+      normalized.split("/").some(function (part) { return !part || part === "." || part === ".."; })
+    ) {
+      throw new Error("Use a normalized relative path inside the workspace.");
+    }
+    return normalized;
+  }
+
+  function useWorkspaceTarget() {
+    var input = byId("target-path-input");
+    try {
+      state.target = normalizeWorkspaceTarget(input && input.value);
+    } catch (error) {
+      showToast(error.message, true);
+      return;
+    }
+    var select = byId("target-select");
+    if (select) {
+      var option = Array.prototype.find.call(select.options, function (item) { return item.value === state.target; });
+      if (!option) {
+        option = document.createElement("option");
+        option.value = state.target;
+        option.textContent = state.target;
+        select.appendChild(option);
+      }
+      select.value = state.target;
+    }
+    setTargetPopover(false);
+    state.report = null;
+    state.analysis = null;
+    state.comparison = null;
+    state.auditWasAutoHealed = false;
+    renderTargetDescription();
+    renderAll();
+    logEvent("workspace target changed to " + state.target, "info");
+    runAudit(false, false);
+  }
+
   function selectView(view) {
     document.querySelectorAll("[data-view]").forEach(function (button) { button.classList.toggle("is-active", button.getAttribute("data-view") === view); });
     if (view === "dashboard" || view === "bugs") {
@@ -485,7 +565,7 @@
 
   async function loadTargets() {
     try {
-      var payload = await request("/api/v1/targets", { method: "GET" });
+      var payload = await request("/api/v1/targets?scope=workspace", { method: "GET" });
       state.targets = safeArray(payload && payload.targets);
       var select = byId("target-select");
       if (select) {
@@ -495,7 +575,7 @@
         options.forEach(function (target) {
           var option = document.createElement("option");
           option.value = target;
-          option.textContent = target;
+          option.textContent = target === "workspace" ? "Current workspace" : target;
           option.selected = target === state.target;
           select.appendChild(option);
         });
@@ -677,8 +757,17 @@
     on("view-file-button", "click", function () { setDrawerView("build"); });
     on("drawer-close", "click", closeDrawer);
     on("terminal-toggle", "click", function () { setDrawerView("reports"); });
+    on("workspace-target-toggle", "click", function () {
+      var popover = byId("target-path-popover");
+      setTargetPopover(!popover || !popover.classList.contains("is-open"));
+    });
+    on("use-target-button", "click", useWorkspaceTarget);
+    on("target-path-input", "keydown", function (event) {
+      if (event.key === "Enter") useWorkspaceTarget();
+      if (event.key === "Escape") setTargetPopover(false);
+    });
     on("target-select", "change", function (event) {
-      state.target = event.target.value || "nightmare_ml_service";
+      state.target = event.target.value || "workspace";
       state.report = null;
       state.analysis = null;
       state.comparison = null;
@@ -706,6 +795,9 @@
     document.addEventListener("click", function (event) {
       var copyButton = event.target.closest ? event.target.closest("[data-copy]") : null;
       if (copyButton) copyText(copyButton.getAttribute("data-copy") || "");
+      var popover = byId("target-path-popover");
+      var toggle = byId("workspace-target-toggle");
+      if (popover && popover.classList.contains("is-open") && !popover.contains(event.target) && event.target !== toggle && (!toggle || !toggle.contains(event.target))) setTargetPopover(false);
     });
   }
 

@@ -1,9 +1,27 @@
-# Offline-review lock/constraints companion for requirements.txt.
-# Every direct dependency is intentionally pinned and must stay in sync.
-fastapi==0.115.0
-uvicorn==0.30.6
-pydantic==2.9.2
-pytest==8.3.3
-httpx==0.27.2
-rich==13.8.1
+# Generated constraints for the Python 3.11.9 Phase 1 environment.
+# Direct dependencies mirror requirements.txt; transitive dependencies are
+# pinned here so a clean rebuild resolves the same dependency graph.
+annotated-types==0.8.0
+anyio==4.15.1
+certifi==2026.7.22
 click==8.1.7
+colorama==0.4.6
+fastapi==0.115.0
+h11==0.16.0
+httpcore==1.0.9
+httpx==0.27.2
+idna==3.20
+iniconfig==2.3.1
+markdown-it-py==4.2.0
+mdurl==0.1.2
+packaging==26.3
+pluggy==1.6.0
+pydantic==2.9.2
+pydantic-core==2.23.4
+Pygments==2.21.0
+pytest==8.3.3
+rich==13.8.1
+sniffio==1.3.1
+starlette==0.38.6
+typing-extensions==4.16.0
+uvicorn==0.30.6

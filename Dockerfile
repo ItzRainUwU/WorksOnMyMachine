@@ -8,6 +8,7 @@ WORKDIR /app
 
 COPY requirements.txt requirements.lock ./
 RUN python -m pip install --no-cache-dir --requirement requirements.txt \
+    --constraint requirements.lock \
     && useradd --create-home --uid 10001 --shell /usr/sbin/nologin appuser
 
 COPY pyproject.toml README.md .env.example ./

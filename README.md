@@ -2,17 +2,16 @@
 
 **Autonomous Cross-OS (Windows/macOS-to-Linux) Reproducibility Scanner, Compiler `apt` Auto-Healer & Merkle Certification Engine.**
 
-![Tests Passing](https://img.shields.io/badge/Tests-44%20Passed-10b981?style=for-the-badge&labelColor=050811)
-
-![Python Version](https://img.shields.io/badge/Python-3.11.9-06b6d4?style=for-the-badge&labelColor=050811)
-
-![CleanRoom Certified](https://img.shields.io/badge/CleanRoom-100%25%20Deterministic-10b981?style=for-the-badge&labelColor=050811)
-
-![Docker Ready](https://img.shields.io/badge/Docker-Non--Root%20Slim-3b82f6?style=for-the-badge&labelColor=050811)
-
-![Offline First](https://img.shields.io/badge/Mode-100%25%20Offline--First-f59e0b?style=for-the-badge&labelColor=050811)
-
-![License](https://img.shields.io/badge/License-MIT-a855f7?style=for-the-badge&labelColor=050811)
+<p align="center">
+  <img src="https://img.shields.io/badge/Tests-44%20Passed-10b981?style=for-the-badge&labelColor=050811" alt="Tests: 44 passed">
+  <img src="https://img.shields.io/badge/Python-3.11.9-06b6d4?style=for-the-badge&labelColor=050811" alt="Python 3.11.9">
+  <img src="https://img.shields.io/badge/CleanRoom-100%25%20Deterministic-10b981?style=for-the-badge&labelColor=050811" alt="CleanRoom: 100 percent deterministic">
+</p>
+<p align="center">
+  <img src="https://img.shields.io/badge/Docker-Non--Root%20Slim-3b82f6?style=for-the-badge&labelColor=050811" alt="Docker: non-root slim">
+  <img src="https://img.shields.io/badge/Mode-100%25%20Offline--First-f59e0b?style=for-the-badge&labelColor=050811" alt="Mode: 100 percent offline-first">
+  <img src="https://img.shields.io/badge/License-MIT-a855f7?style=for-the-badge&labelColor=050811" alt="License: MIT">
+</p>
 
 [Overview](#overview) · [What It Heals](#what-breaks-vs-how-it-heals) · [Architecture](#system-architecture) · [Quickstart](#quickstart) · [Web UI & CLI](#web-dashboard--cli) · [API Reference](#api-reference) · [Demo Targets](#demo-targets) · [Docker & Testing](#docker--testing)
 
@@ -200,6 +199,7 @@ curl --request POST http://127.0.0.1:8000/api/v1/parse-log \
 ## Demo Targets
 
 The `demo_targets/` directory contains three broken sample repositories used for automated testing and 1-click demos:
+
 
 - **`nightmare_ml_service`** — Hardcoded Windows paths (`C:\Users\Dev\...`), backslash path separators, missing `.env.example` keys, `CRLF` shell script without a shebang, an unpinned `python:latest` image running as root, and simulated `Python.h`, `pg_config`, and `libGL.so.1` failures.
 - **`case_sensitive_webapp`** — Python and JavaScript import casing mismatches that work on Windows/macOS but fail on Linux `ext4`, unpinned requirements, and a floating Docker base image.

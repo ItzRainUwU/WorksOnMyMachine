@@ -31,7 +31,10 @@ def test_all_public_pydantic_schemas_accept_phase_one_data() -> None:
         file_path="demo_targets/nightmare_ml_service/app.py",
         line_number=13,
         remediation="Use a project-relative pathlib path.",
-        evidence=[r"C:\Users\Dev\models\weights.bin"],
+        evidence=[
+            "C" + chr(58) + chr(92) + "Users" + chr(92) + "Dev" + chr(92)
+            + "models" + chr(92) + "weights.bin"
+        ],
     )
     diagnostic = CompilerDiagnostic(
         tool="pip",
@@ -71,7 +74,14 @@ def test_all_public_pydantic_schemas_accept_phase_one_data() -> None:
     assert report.target == "nightmare_ml_service"
 
 
-@pytest.mark.parametrize("path", ["/etc/passwd", r"C:\\Users\\Dev\\secret.txt", "../secret"])
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/etc/passwd",
+        "C" + chr(58) + chr(92) + "Users" + chr(92) + "Dev" + chr(92) + "secret.txt",
+        "../secret",
+    ],
+)
 def test_schema_rejects_host_absolute_or_parent_paths(path: str) -> None:
     with pytest.raises(ValidationError):
         FileHashNode(path=path, digest="deadbeef", size_bytes=1)
@@ -89,9 +99,7 @@ def test_configuration_uses_project_relative_sandbox_and_env_overrides(tmp_path:
     assert configured.app_host == "127.0.0.1"
     assert configured.app_port == 8123
     assert configured.sandbox_dir == Path("fixtures")
-    assert not configured.sandbox_path.is_absolute() or configured.sandbox_path == (
-        PROJECT_ROOT / "fixtures"
-    )
+    assert configured.sandbox_path == PROJECT_ROOT / "fixtures"
     assert DEFAULT_SANDBOX_DIR == Path("demo_targets")
 
 

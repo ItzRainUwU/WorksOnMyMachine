@@ -1,0 +1,9 @@
+# Offline-review lock/constraints companion for requirements.txt.
+# Every direct dependency is intentionally pinned and must stay in sync.
+fastapi==0.115.0
+uvicorn==0.30.6
+pydantic==2.9.2
+pytest==8.3.3
+httpx==0.27.2
+rich==13.8.1
+click==8.1.7

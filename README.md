@@ -147,6 +147,8 @@ The web UI serves local HTML, CSS, JavaScript, and custom inline SVG graphics wi
 - **Compiler-to-APT & Dockerfile Viewer:** Side-by-side and unified diff views for hardened Dockerfiles.
 - **Interactive SVG Merkle Graph:** Visual node-link tree of file SHA-256 digests and downloadable JSON certificates.
 - **Workspace-relative targets:** The dashboard audits the current repository by default and accepts any normalized repository path inside the workspace, such as `projects/api-service`.
+- **Opt-in staged build verification:** The Build & Deploy drawer can run Docker against a temporary healed copy and reports passed, failed, blocked, or timed-out status without mutating source.
+- **Local audit history and issue evidence:** Completed runs persist in browser storage, and each finding opens bounded source context, remediation, and raw evidence.
 
 ### CLI Commands
 
@@ -180,6 +182,8 @@ worksonmymachine scan nightmare_ml_service
 | `POST` | `/api/v1/heal-dockerfile` | Harden a staged `Dockerfile` and inject `apt` packages |
 | `POST` | `/api/v1/certify`         | Generate a deterministic SHA-256 Merkle certificate    |
 | `POST` | `/api/v1/compare`         | Compare certificate drift between snapshots            |
+| `POST` | `/api/v1/verify-build`    | Opt-in Docker build of an isolated staged copy         |
+| `POST` | `/api/v1/issue-context`   | Return bounded source context for one finding           |
 | `POST` | `/api/v1/audit`           | Run the unified scan, heal, and certification workflow |
 
 ### Example API Calls

@@ -1,9 +1,14 @@
 """FastAPI service surface for target discovery, scanning, and healing."""
 
 from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
+import re
 import shutil
+import subprocess
 import tempfile
+import time
+import uuid
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
@@ -15,6 +20,7 @@ from .config import PROJECT_ROOT, settings
 from .apt_healer import analyze_log_hybrid, heal_dockerfile
 from .models import (
     CompilerDiagnostic,
+    BuildVerification,
     DockerfilePatchResult,
     HealResult,
     LandmineIssue,
@@ -111,6 +117,26 @@ class AuditRequest(BaseModel):
 
     target: str = Field(min_length=1)
     auto_heal: bool = False
+
+
+class BuildVerificationRequest(BaseModel):
+    """Request an explicit Docker build from an isolated target copy."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    target: str = Field(min_length=1)
+    auto_heal: bool = True
+    timeout_seconds: int = Field(default=120, ge=5, le=900)
+
+
+class IssueContextRequest(BaseModel):
+    """Request bounded source context for one workspace-relative finding."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    target: str = Field(min_length=1)
+    file_path: str = Field(min_length=1)
+    line_number: int | None = Field(default=None, ge=1)
 
 
 @app.get("/health")
@@ -378,6 +404,222 @@ def compare(request: CompareRequest) -> dict[str, object]:
         }
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+_BUILD_IGNORED_DIRECTORIES = (
+    ".git",
+    ".opencode",
+    ".pytest_cache",
+    ".venv",
+    "__pycache__",
+    "build",
+    "dist",
+    "node_modules",
+)
+_SECRET_OUTPUT = re.compile(
+    r"(?i)(\b(?:password|passwd|secret|token|api[_-]?key)\b\s*[=:]\s*)([^\s,;]+)"
+)
+
+
+def _redact_build_output(value: str, limit: int = 12000) -> str:
+    """Keep build receipts useful without persisting common secret values."""
+
+    redacted = _SECRET_OUTPUT.sub(r"\1[REDACTED]", value or "")
+    return redacted[-limit:]
+
+
+def _verification_response(
+    *,
+    verification_id: str,
+    target: str,
+    status: str,
+    started_at: datetime,
+    command: list[str],
+    exit_code: int | None = None,
+    output: str = "",
+    detail: str = "",
+    auto_heal: bool,
+) -> BuildVerification:
+    completed_at = datetime.now(timezone.utc)
+    return BuildVerification(
+        verification_id=verification_id,
+        target=target,
+        status=status,
+        started_at=started_at,
+        completed_at=completed_at,
+        duration_seconds=max(0.0, (completed_at - started_at).total_seconds()),
+        command=command,
+        exit_code=exit_code,
+        output=_redact_build_output(output),
+        detail=detail,
+        auto_heal=auto_heal,
+    )
+
+
+@app.post("/api/v1/verify-build", response_model=BuildVerification)
+def verify_build(request: BuildVerificationRequest) -> BuildVerification:
+    """Build a temporary staged copy with Docker when explicitly requested."""
+
+    started_at = datetime.now(timezone.utc)
+    verification_id = uuid.uuid4().hex
+    try:
+        target_path = _resolve_target(request.target)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    dockerfile_name = "Dockerfile" if (target_path / "Dockerfile").is_file() else "Dockerfile.broken"
+    display_command = [
+        "docker",
+        "build",
+        "--progress=plain",
+        "--file",
+        dockerfile_name,
+        "--tag",
+        "<verification-image>",
+        "<staged-context>",
+    ]
+    if not (target_path / dockerfile_name).is_file():
+        return _verification_response(
+            verification_id=verification_id,
+            target=request.target,
+            status="blocked",
+            started_at=started_at,
+            command=display_command,
+            detail="No Dockerfile or Dockerfile.broken was found in the selected target.",
+            auto_heal=request.auto_heal,
+        )
+    if shutil.which("docker") is None:
+        return _verification_response(
+            verification_id=verification_id,
+            target=request.target,
+            status="blocked",
+            started_at=started_at,
+            command=display_command,
+            detail="Docker is not installed or is not available on PATH.",
+            auto_heal=request.auto_heal,
+        )
+
+    staging = Path(tempfile.mkdtemp(prefix="worksonmymachine-build-"))
+    tag = "worksonmymachine-verify:" + verification_id[:12]
+    actual_command = [
+        "docker",
+        "build",
+        "--progress=plain",
+        "--file",
+        str(staging / dockerfile_name),
+        "--tag",
+        tag,
+        str(staging),
+    ]
+    output = ""
+    try:
+        if request.auto_heal:
+            heal_repository(target_path, staging)
+        else:
+            shutil.copytree(
+                target_path,
+                staging,
+                symlinks=True,
+                dirs_exist_ok=True,
+                ignore=shutil.ignore_patterns(*_BUILD_IGNORED_DIRECTORIES),
+            )
+        process = subprocess.run(
+            actual_command,
+            cwd=staging,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=request.timeout_seconds,
+            check=False,
+        )
+        output = (process.stdout or "") + ("\n" + process.stderr if process.stderr else "")
+        return _verification_response(
+            verification_id=verification_id,
+            target=request.target,
+            status="passed" if process.returncode == 0 else "failed",
+            started_at=started_at,
+            command=display_command,
+            exit_code=process.returncode,
+            output=output,
+            detail="Staged Docker build completed." if process.returncode == 0 else "Staged Docker build exited with a non-zero status.",
+            auto_heal=request.auto_heal,
+        )
+    except subprocess.TimeoutExpired as exc:
+        output = (exc.stdout or "") if isinstance(exc.stdout, str) else (exc.stdout or b"").decode("utf-8", "replace")
+        return _verification_response(
+            verification_id=verification_id,
+            target=request.target,
+            status="timed_out",
+            started_at=started_at,
+            command=display_command,
+            output=output,
+            detail=f"Docker build exceeded the {request.timeout_seconds}-second timeout.",
+            auto_heal=request.auto_heal,
+        )
+    except (OSError, ValueError) as exc:
+        return _verification_response(
+            verification_id=verification_id,
+            target=request.target,
+            status="failed",
+            started_at=started_at,
+            command=display_command,
+            output=output,
+            detail=f"Could not prepare the staged build: {exc}",
+            auto_heal=request.auto_heal,
+        )
+    finally:
+        if shutil.which("docker") is not None:
+            subprocess.run(
+                ["docker", "image", "rm", "--force", tag],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+@app.post("/api/v1/issue-context")
+def issue_context(request: IssueContextRequest) -> dict[str, object]:
+    """Return bounded source context for a finding inside a selected target."""
+
+    raw_path = request.file_path.strip()
+    parts = raw_path.split("/")
+    if (
+        not raw_path
+        or "\\" in raw_path
+        or raw_path.startswith("/")
+        or (len(parts[0]) >= 2 and parts[0][1] == ":")
+        or any(part in {"", ".", ".."} for part in parts)
+    ):
+        raise HTTPException(status_code=400, detail="file_path must be a normalized relative POSIX path")
+    try:
+        target_path = _resolve_target(request.target)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    root = target_path.resolve()
+    source = (root / Path(*parts)).resolve()
+    try:
+        source.relative_to(root)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="file_path must remain inside the target") from exc
+    if not source.is_file() or source.stat().st_size > 2_000_000:
+        raise HTTPException(status_code=404, detail="source file is unavailable for context")
+    try:
+        lines = source.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        raise HTTPException(status_code=404, detail="source file is unreadable") from exc
+    center = request.line_number or 1
+    start = max(1, center - 3)
+    end = min(len(lines), center + 3)
+    return {
+        "target": request.target,
+        "file_path": raw_path,
+        "line_number": request.line_number,
+        "start_line": start,
+        "end_line": end,
+        "lines": [{"number": index, "text": lines[index - 1]} for index in range(start, end + 1)],
+    }
 
 
 @app.post("/api/v1/audit", response_model=AuditReport)

@@ -8,6 +8,9 @@
     report: null,
     analysis: null,
     comparison: null,
+    buildVerification: null,
+    history: [],
+    selectedHistoryId: null,
     auditWasAutoHealed: false,
     issueFilter: "all",
     issueSearch: "",
@@ -83,6 +86,70 @@
   function setText(id, value) {
     var element = byId(id);
     if (element) element.textContent = String(value == null ? "" : value);
+  }
+
+  function loadHistory() {
+    try {
+      var stored = JSON.parse(window.localStorage.getItem("worksonmymachine.auditHistory") || "[]");
+      state.history = Array.isArray(stored) ? stored.slice(0, 12) : [];
+    } catch (error) {
+      state.history = [];
+    }
+  }
+
+  function persistHistory() {
+    try {
+      window.localStorage.setItem("worksonmymachine.auditHistory", JSON.stringify(state.history.slice(0, 12)));
+    } catch (error) {
+      logEvent("audit history storage unavailable", "warning");
+    }
+  }
+
+  function saveAuditHistory() {
+    if (!state.report) return;
+    var report = state.report;
+    var id = String(report.target || state.target) + "|" + String(report.scanned_at || "");
+    var record = {
+      id: id,
+      target: state.target,
+      scanned_at: report.scanned_at || new Date().toISOString(),
+      auto_heal: Boolean(state.auditWasAutoHealed),
+      readiness: readinessScore(report),
+      issue_count: displayIssues().length,
+      report: report,
+      build_verification: state.buildVerification,
+    };
+    var existing = state.history.findIndex(function (item) { return item.id === id; });
+    if (existing >= 0) state.history.splice(existing, 1);
+    state.history.unshift(record);
+    state.history = state.history.slice(0, 12);
+    state.selectedHistoryId = id;
+    persistHistory();
+  }
+
+  function selectHistory(id) {
+    var record = state.history.find(function (item) { return item.id === id; });
+    if (!record || !record.report) return;
+    state.selectedHistoryId = record.id;
+    state.target = record.target || "workspace";
+    state.report = record.report;
+    state.analysis = null;
+    state.comparison = null;
+    state.auditWasAutoHealed = Boolean(record.auto_heal);
+    state.buildVerification = record.build_verification || null;
+    var select = byId("target-select");
+    if (select) {
+      var option = Array.prototype.find.call(select.options, function (item) { return item.value === state.target; });
+      if (!option) {
+        option = document.createElement("option");
+        option.value = state.target;
+        option.textContent = state.target === "workspace" ? "Current workspace" : state.target;
+        select.appendChild(option);
+      }
+      select.value = state.target;
+    }
+    renderTargetDescription();
+    renderAll();
   }
 
   function renderTargetDescription() {
@@ -315,8 +382,12 @@
         return iconClass(names[platform], 15, platform + "-logo", platform);
       }).join("");
       var description = issue.remediation || "Review this assumption before moving the build to a clean room.";
-      return '<tr><td><code>' + escapeHtml(issueDisplayId(issue, originalIndex)) + '</code></td><td><span class="severity severity-' + severity + '">' + escapeHtml(severity) + '</span></td><td><span class="os-icons" aria-label="Affected platforms">' + platforms + '</span></td><td><div class="issue-desc"><strong>' + escapeHtml(issue.message || "Unclassified issue") + '</strong><span>' + escapeHtml(description) + '</span></div></td><td><span class="issue-path" title="' + escapeHtml(issueLocation(issue)) + '">' + escapeHtml(issueLocation(issue)) + '</span></td><td><span class="issue-status ' + (fixed ? "status-fixed" : "status-open") + '">' + (fixed ? "FIXED" : "OPEN") + '</span></td></tr>';
+      return '<tr data-issue-index="' + originalIndex + '" tabindex="0"><td><code>' + escapeHtml(issueDisplayId(issue, originalIndex)) + '</code></td><td><span class="severity severity-' + severity + '">' + escapeHtml(severity) + '</span></td><td><span class="os-icons" aria-label="Affected platforms">' + platforms + '</span></td><td><div class="issue-desc"><strong>' + escapeHtml(issue.message || "Unclassified issue") + '</strong><span>' + escapeHtml(description) + '</span></div></td><td><span class="issue-path" title="' + escapeHtml(issueLocation(issue)) + '">' + escapeHtml(issueLocation(issue)) + '</span></td><td><span class="issue-status ' + (fixed ? "status-fixed" : "status-open") + '">' + (fixed ? "FIXED" : "OPEN") + '</span></td></tr>';
     }).join("") + '</tbody></table></div>';
+    list.querySelectorAll("[data-issue-index]").forEach(function (row) {
+      row.addEventListener("click", function () { openIssueDetail(row.getAttribute("data-issue-index")); });
+      row.addEventListener("keydown", function (event) { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openIssueDetail(row.getAttribute("data-issue-index")); } });
+    });
     hydrateIcons();
   }
 
@@ -331,7 +402,7 @@
       dependencies: Boolean(report && dependencyScore(report) != null),
       tests: Boolean(report && report.certificate),
       heal: Boolean(report && state.auditWasAutoHealed),
-      build: Boolean(report && report.certificate && (report.reproducible || report.certificate.verified)),
+      build: Boolean(state.buildVerification && state.buildVerification.status === "passed"),
       certificate: Boolean(report && report.certificate),
     };
     document.querySelectorAll("[data-check]").forEach(function (item) {
@@ -346,6 +417,78 @@
   function renderReportJson() {
     var reportNode = byId("report-json");
     if (reportNode) reportNode.textContent = state.report ? JSON.stringify(state.report, null, 2) : "No audit report loaded.";
+  }
+
+  function renderHistory() {
+    var list = byId("history-list");
+    if (!list) return;
+    if (!state.history.length) {
+      list.innerHTML = '<div class="history-empty">No saved audit runs yet. Completed audits will appear here automatically.</div>';
+      return;
+    }
+    list.innerHTML = state.history.map(function (record) {
+      var date = new Date(record.scanned_at || Date.now()).toLocaleString();
+      var readiness = record.readiness == null ? "--" : Math.round(Number(record.readiness)) + "%";
+      return '<button class="history-item ' + (record.id === state.selectedHistoryId ? "is-active" : "") + '" type="button" data-history-id="' + escapeHtml(record.id) + '"><span><strong>' + escapeHtml(record.target || "workspace") + '</strong><small>' + escapeHtml(date) + ' / ' + escapeHtml(String(record.issue_count || 0)) + ' findings</small></span><em>' + escapeHtml(readiness) + '</em></button>';
+    }).join("");
+    list.querySelectorAll("[data-history-id]").forEach(function (button) {
+      button.addEventListener("click", function () { selectHistory(button.getAttribute("data-history-id")); });
+    });
+  }
+
+  function renderBuildVerification() {
+    var result = state.buildVerification;
+    var card = byId("build-verification-card");
+    var status = byId("build-verification-status");
+    var output = byId("build-verification-log");
+    if (!card || !status || !output) return;
+    card.classList.remove("is-passed", "is-failed", "is-blocked");
+    if (!result) {
+      setText("build-verification-status", "NOT RUN");
+      output.textContent = "No staged build has been requested.";
+      return;
+    }
+    var normalized = String(result.status || "unknown").toLowerCase();
+    card.classList.toggle("is-passed", normalized === "passed");
+    card.classList.toggle("is-failed", normalized === "failed" || normalized === "timed_out");
+    card.classList.toggle("is-blocked", normalized === "blocked");
+    setText("build-verification-status", normalized.replace(/_/g, " ").toUpperCase());
+    output.textContent = (result.detail || "") + (result.output ? "\n\n" + result.output : "");
+  }
+
+  function renderIssueDetail(issue) {
+    if (!issue) return;
+    setText("issue-detail-title", issue.message || issue.issue_id || "Issue detail");
+    setText("issue-detail-severity", String(issue.severity || "medium").toUpperCase());
+    setText("issue-detail-category", issue.category || "unclassified");
+    setText("issue-detail-location", issueLocation(issue));
+    setText("issue-detail-message", issue.message || "No issue message returned.");
+    setText("issue-detail-remediation", issue.remediation || "No remediation returned.");
+    var status = byId("issue-detail-status");
+    var fixed = issueIsFixed(issue);
+    if (status) {
+      status.textContent = fixed ? "FIXED" : "OPEN";
+      status.classList.toggle("status-fixed", fixed);
+      status.classList.toggle("status-open", !fixed);
+    }
+    var evidence = byId("issue-detail-evidence");
+    var evidenceItems = safeArray(issue.evidence);
+    if (evidence) evidence.innerHTML = evidenceItems.length ? evidenceItems.map(function (item) { return "<li>" + escapeHtml(item) + "</li>"; }).join("") : "<li>No raw evidence recorded.</li>";
+    var source = byId("issue-detail-source");
+    if (source) source.textContent = issue.file_path ? "Loading source context..." : "This finding has no file path context.";
+    setDrawerView("issue");
+    if (!issue.file_path) return;
+    request("/api/v1/issue-context", { method: "POST", body: { target: state.target, file_path: issue.file_path, line_number: issue.line_number || null } }).then(function (context) {
+      if (!source) return;
+      source.textContent = safeArray(context.lines).map(function (line) { return String(line.number).padStart(4, " ") + " | " + line.text; }).join("\n") || "No source context returned.";
+    }).catch(function (error) {
+      if (source) source.textContent = "Source context unavailable: " + error.message;
+    });
+  }
+
+  function openIssueDetail(index) {
+    var issue = displayIssues()[Number(index)];
+    if (issue) renderIssueDetail(issue);
   }
 
   function diffText(text) {
@@ -458,6 +601,8 @@
     renderDockerfile();
     renderCertificate();
     renderReportJson();
+    renderHistory();
+    renderBuildVerification();
     renderAuditState();
     hydrateIcons();
   }
@@ -470,7 +615,7 @@
     document.querySelectorAll("[data-drawer-view]").forEach(function (panel) {
       panel.classList.toggle("is-active", panel.getAttribute("data-drawer-view") === view);
     });
-    var titles = { dependency: ["DEPENDENCY GRAPH / BUILD TELEMETRY", "Compiler Sandbox"], build: ["BUILD & DEPLOY / STAGING", "Isolated Healing Operations"], security: ["SECURITY / PROOF ARTIFACT", "CleanRoom Certificate"], reports: ["REPORTS / AUDIT RECEIPT", "Run Evidence"], settings: ["SETTINGS / LOCAL ENGINE", "Runtime Posture"] };
+    var titles = { dependency: ["DEPENDENCY GRAPH / BUILD TELEMETRY", "Compiler Sandbox"], build: ["BUILD & DEPLOY / STAGING", "Isolated Healing Operations"], security: ["SECURITY / PROOF ARTIFACT", "CleanRoom Certificate"], reports: ["REPORTS / AUDIT RECEIPT", "Run Evidence"], issue: ["FINDING / SOURCE EVIDENCE", "Issue detail"], settings: ["SETTINGS / LOCAL ENGINE", "Runtime Posture"] };
     var title = titles[view] || titles.reports;
     setText("drawer-kicker", title[0]);
     setText("drawer-title", title[1]);
@@ -541,6 +686,7 @@
     state.report = null;
     state.analysis = null;
     state.comparison = null;
+    state.buildVerification = null;
     state.auditWasAutoHealed = false;
     renderTargetDescription();
     renderAll();
@@ -603,8 +749,10 @@
       state.report = await request("/api/v1/audit", { method: "POST", body: { target: state.target, auto_heal: Boolean(autoHeal) } });
       state.analysis = null;
       state.comparison = null;
+      state.buildVerification = null;
       setConnection("All Systems Operational", "success");
       logEvent((autoHeal ? "auto-heal" : "audit") + " complete", "success");
+      saveAuditHistory();
       renderAll();
       if (!quiet) showToast(autoHeal ? "Auto-heal evidence is ready." : "Repository audit is ready.", false);
     } catch (error) {
@@ -697,6 +845,7 @@
       if (!state.report) state.report = { target: state.target, issues: [] };
       state.report.certificate = certificate;
       state.report.merkle_root = certificate.root_hash;
+      saveAuditHistory();
       logEvent("certificate generated", "success");
       renderAll();
       showToast("Certificate evidence is ready.", false);
@@ -716,6 +865,7 @@
     try {
       state.comparison = await request("/api/v1/compare", { method: "POST", body: { target: state.target, auto_heal: true } });
       logEvent("comparison evidence received", "success");
+      saveAuditHistory();
       renderCertificate();
       showToast("Certificate comparison is ready.", false);
     } catch (error) {
@@ -724,6 +874,27 @@
     } finally {
       setBusy("compare-button", false);
       setBusy("build-compare-button", false);
+    }
+  }
+
+  async function verifyBuild() {
+    if (state.busy) return;
+    setBusy("verify-build-button", true);
+    logEvent("starting staged Docker build for " + state.target, "info");
+    setText("build-verification-status", "RUNNING");
+    try {
+      state.buildVerification = await request("/api/v1/verify-build", { method: "POST", body: { target: state.target, auto_heal: true } });
+      logEvent("staged build " + state.buildVerification.status, state.buildVerification.status === "passed" ? "success" : "warning");
+      saveAuditHistory();
+      renderAll();
+      showToast("Staged build " + state.buildVerification.status + ".", state.buildVerification.status === "failed" || state.buildVerification.status === "timed_out");
+    } catch (error) {
+      logEvent("staged build failed: " + error.message, "error");
+      showToast("Staged build failed: " + error.message, true);
+    } finally {
+      setBusy("verify-build-button", false);
+      renderBuildVerification();
+      renderAuditState();
     }
   }
 
@@ -771,6 +942,7 @@
       state.report = null;
       state.analysis = null;
       state.comparison = null;
+      state.buildVerification = null;
       state.auditWasAutoHealed = false;
       renderTargetDescription();
       renderAll();
@@ -790,6 +962,7 @@
       document.querySelectorAll("[data-issue-filter]").forEach(function (item) { item.classList.toggle("is-active", item.getAttribute("data-issue-filter") === state.issueFilter); });
       renderIssueList();
     });
+    on("verify-build-button", "click", function () { setDrawerView("build"); verifyBuild(); });
     document.querySelectorAll("[data-view]").forEach(function (button) { button.addEventListener("click", function () { selectView(button.getAttribute("data-view")); }); });
     document.querySelectorAll("[data-log-preset]").forEach(function (button) { button.addEventListener("click", function () { var editor = byId("compiler-log-editor"); if (editor) editor.value = logPresets[button.getAttribute("data-log-preset")] || ""; }); });
     document.addEventListener("click", function (event) {
@@ -802,6 +975,7 @@
   }
 
   async function bootstrap() {
+    loadHistory();
     hydrateIcons();
     bindEvents();
     renderTargetDescription();
@@ -817,6 +991,7 @@
     parseLog: parseLog,
     certify: certify,
     compare: compare,
+    verifyBuild: verifyBuild,
     selectView: selectView,
   };
 

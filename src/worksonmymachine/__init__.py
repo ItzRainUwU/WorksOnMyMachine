@@ -6,6 +6,7 @@ __version__ = "0.1.0"
 
 from .models import (
     AuditReport,
+    BuildVerification,
     CompilerDiagnostic,
     DockerfilePatchResult,
     FileHashNode,
@@ -28,6 +29,7 @@ from .repro_hash import (
 
 __all__ = [
     "AuditReport",
+    "BuildVerification",
     "CompilerDiagnostic",
     "DockerfilePatchResult",
     "FileHashNode",

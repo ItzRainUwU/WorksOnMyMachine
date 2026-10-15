@@ -229,6 +229,24 @@ class AuditReport(_StrictModel):
     _validate_target = field_validator("target")(_relative_posix_path)
 
 
+class BuildVerification(_StrictModel):
+    """Result of an explicit Docker build executed from a staged target copy."""
+
+    verification_id: str = Field(min_length=1)
+    target: str = Field(min_length=1)
+    status: str = Field(min_length=1)
+    started_at: datetime
+    completed_at: datetime | None = None
+    duration_seconds: float = Field(default=0.0, ge=0.0)
+    command: list[str] = Field(default_factory=list)
+    exit_code: int | None = None
+    output: str = ""
+    detail: str = ""
+    auto_heal: bool = False
+
+    _validate_target = field_validator("target")(_relative_posix_path)
+
+
 class HealResult(_StrictModel):
     """The deterministic result of healing a copied repository tree."""
 

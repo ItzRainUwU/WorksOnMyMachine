@@ -927,6 +927,10 @@ pre,
   background: rgba(34, 211, 238, 0.035);
 }
 
+.issues-table tbody tr {
+  cursor: pointer;
+}
+
 .issues-table tbody tr:last-child td {
   border-bottom: 0;
 }
@@ -1700,6 +1704,174 @@ pre,
   line-height: 1.55;
   white-space: pre-wrap;
 }
+
+.history-list {
+  display: grid;
+  gap: 6px;
+  max-height: 158px;
+  margin-bottom: 10px;
+  overflow: auto;
+}
+
+.history-empty {
+  padding: 10px;
+  color: #718096;
+  background: #050b15;
+  border: 1px dashed #263954;
+  border-radius: 5px;
+  font-size: 10px;
+}
+
+.history-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+  padding: 8px 9px;
+  color: #a9b9ca;
+  text-align: left;
+  background: #091321;
+  border: 1px solid #1a2b43;
+  border-radius: 5px;
+}
+
+.history-item:hover,
+.history-item.is-active {
+  color: #e2e8f0;
+  border-color: rgba(34, 211, 238, 0.45);
+  background: rgba(34, 211, 238, 0.06);
+}
+
+.history-item > span {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.history-item strong,
+.history-item small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-item strong {
+  color: #dbe7f3;
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 600;
+}
+
+.history-item small {
+  color: #718096;
+  font-size: 9px;
+}
+
+.history-item em {
+  flex: 0 0 auto;
+  color: var(--emerald-bright);
+  font-family: var(--mono);
+  font-size: 8px;
+  font-style: normal;
+  text-transform: uppercase;
+}
+
+.issue-detail-grid {
+  display: grid;
+  grid-template-columns: 0.6fr 1fr 2fr;
+  gap: 10px;
+  margin-bottom: 15px;
+}
+
+.issue-detail-grid > div {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 9px;
+  background: #050b15;
+  border: 1px solid #17263c;
+  border-radius: 5px;
+}
+
+.issue-detail-grid strong {
+  overflow: hidden;
+  color: #dce7f1;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 550;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.issue-detail-message {
+  margin: 0 0 15px;
+  color: #e2e8f0;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.issue-detail-section {
+  margin-top: 14px;
+}
+
+.issue-detail-section > p {
+  margin: 6px 0 0;
+  color: #9fb0c4;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.evidence-list {
+  display: grid;
+  gap: 5px;
+  margin: 7px 0 0;
+  padding-left: 18px;
+  color: #9fb0c4;
+  font-family: var(--mono);
+  font-size: 9px;
+}
+
+.source-context,
+.build-verification-log {
+  max-height: 260px;
+  margin: 7px 0 0;
+  padding: 10px;
+  overflow: auto;
+  color: #91e8f5;
+  background: #030811;
+  border: 1px solid #17263c;
+  border-radius: 5px;
+  font-family: var(--mono);
+  font-size: 9px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.build-verification-card {
+  margin-top: 14px;
+  padding: 10px;
+  background: #050b15;
+  border: 1px solid #17263c;
+  border-radius: 5px;
+}
+
+.build-verification-card > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.build-verification-card > div strong {
+  color: #94a3b8;
+  font-family: var(--mono);
+  font-size: 9px;
+}
+
+.build-verification-card.is-passed > div strong { color: var(--emerald-bright); }
+.build-verification-card.is-failed > div strong { color: var(--red-soft); }
+.build-verification-card.is-blocked > div strong { color: var(--amber-soft); }
 
 .build-status-grid {
   display: grid;

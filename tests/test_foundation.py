@@ -1,6 +1,7 @@
 """Phase 1 foundation tests; all checks are local and network-free."""
 
 from pathlib import Path
+import importlib
 
 import pytest
 from fastapi.testclient import TestClient
@@ -17,6 +18,9 @@ from worksonmymachine import (
 )
 from worksonmymachine.app import app
 from worksonmymachine.config import DEFAULT_SANDBOX_DIR, load_settings
+
+
+APP_MODULE = importlib.import_module("worksonmymachine.app")
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -148,3 +152,34 @@ def test_workspace_alias_resolves_to_the_project_root() -> None:
 
     assert response.status_code == 200
     assert response.json()["target"] == "workspace"
+
+
+def test_issue_context_returns_bounded_source_lines() -> None:
+    response = TestClient(app).post(
+        "/api/v1/issue-context",
+        json={
+            "target": "demo_targets/nightmare_ml_service",
+            "file_path": "app.py",
+            "line_number": 13,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["file_path"] == "app.py"
+    assert body["lines"]
+    assert any(line["number"] == 13 for line in body["lines"])
+
+
+def test_staged_build_reports_blocked_without_docker(monkeypatch) -> None:
+    monkeypatch.setattr(APP_MODULE.shutil, "which", lambda name: None)
+
+    response = TestClient(app).post(
+        "/api/v1/verify-build",
+        json={"target": "demo_targets/nightmare_ml_service", "auto_heal": True},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "blocked"
+    assert "Docker" in body["detail"]

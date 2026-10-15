@@ -1,0 +1,2 @@
+* text=auto
+demo_targets/nightmare_ml_service/entrypoint.sh -text -diff

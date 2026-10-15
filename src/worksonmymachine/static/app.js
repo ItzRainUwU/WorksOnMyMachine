@@ -9,7 +9,10 @@
     analysis: null,
     comparison: null,
     auditWasAutoHealed: false,
-    events: [{ message: "clean room ready", level: "success" }],
+    issueFilter: "all",
+    issueSearch: "",
+    activeView: "dashboard",
+    events: [{ message: "clean room ready", level: "success", time: new Date() }],
     busy: false,
     toastTimer: null,
   };
@@ -52,6 +55,10 @@
     return icons && icons.icon ? icons.icon(name, size, label) : "";
   }
 
+  function iconClass(name, size, className, label) {
+    return icon(name, size, label).replace('class="cr-icon"', 'class="cr-icon ' + className + '"');
+  }
+
   function safeArray(value) {
     return Array.isArray(value) ? value : [];
   }
@@ -64,7 +71,12 @@
   function truncate(value, start, end) {
     var text = String(value || "pending");
     if (text.length <= start + end + 3) return text;
-    return text.slice(0, start) + "..." + text.slice(-end);
+    return text.slice(0, start) + "..." + (end ? text.slice(-end) : "");
+  }
+
+  function nowStamp() {
+    var date = new Date();
+    return date.getFullYear() + "-" + String(date.getMonth() + 1).padStart(2, "0") + "-" + String(date.getDate()).padStart(2, "0") + " " + String(date.getHours()).padStart(2, "0") + ":" + String(date.getMinutes()).padStart(2, "0") + ":" + String(date.getSeconds()).padStart(2, "0");
   }
 
   function setText(id, value) {
@@ -73,8 +85,11 @@
   }
 
   function renderTargetDescription() {
+    var description = targetDescriptions[state.target] || "Workspace target selected for deterministic audit.";
     var select = byId("target-select");
-    if (select) select.title = targetDescriptions[state.target] || "Workspace target";
+    if (select) select.title = description;
+    setText("settings-target-description", description);
+    setText("build-target", state.target);
   }
 
   function setConnection(label, tone) {
@@ -93,27 +108,23 @@
     toast.textContent = message;
     toast.classList.toggle("is-error", Boolean(isError));
     toast.classList.add("is-visible");
-    state.toastTimer = window.setTimeout(function () {
-      toast.classList.remove("is-visible");
-    }, 3600);
+    state.toastTimer = window.setTimeout(function () { toast.classList.remove("is-visible"); }, 3600);
   }
 
   function logEvent(message, level) {
-    state.events.push({ message: String(message), level: level || "info" });
-    if (state.events.length > 28) state.events = state.events.slice(-28);
+    state.events.push({ message: String(message), level: level || "info", time: new Date() });
+    if (state.events.length > 30) state.events = state.events.slice(-30);
     renderTerminal();
   }
 
   function renderTerminal() {
     var output = byId("terminal-output");
     if (!output) return;
-    output.textContent = state.events
-      .map(function (entry) {
-        var stamp = new Date().toISOString().slice(11, 19);
-        var tag = String(entry.level || "info").toUpperCase();
-        return "[" + stamp + "] [" + tag + "] " + entry.message;
-      })
-      .join("\n");
+    output.textContent = state.events.map(function (entry) {
+      var date = entry.time instanceof Date ? entry.time : new Date(entry.time || Date.now());
+      var stamp = date.getFullYear() + "-" + String(date.getMonth() + 1).padStart(2, "0") + "-" + String(date.getDate()).padStart(2, "0") + " " + String(date.getHours()).padStart(2, "0") + ":" + String(date.getMinutes()).padStart(2, "0") + ":" + String(date.getSeconds()).padStart(2, "0");
+      return stamp + " [" + String(entry.level || "info").toUpperCase() + "] " + entry.message;
+    }).join("\n");
     output.scrollTop = output.scrollHeight;
   }
 
@@ -135,11 +146,7 @@
     }
     var response = await fetch(path, init);
     var payload = null;
-    try {
-      payload = await response.json();
-    } catch (error) {
-      payload = null;
-    }
+    try { payload = await response.json(); } catch (error) { payload = null; }
     if (!response.ok) {
       var detail = payload && (payload.detail || payload.message);
       throw new Error(detail || "Request failed with status " + response.status);
@@ -155,13 +162,64 @@
     button.setAttribute("aria-busy", busy ? "true" : "false");
   }
 
+  function selectedCertificate(report) {
+    if (!report) return {};
+    return report.after_certificate || report.certificate || report.before_certificate || {};
+  }
+
   function readinessScore(report) {
+    var certificate = selectedCertificate(report);
     if (!report) return null;
-    var certificate = report.certificate || {};
-    if (Number.isFinite(Number(certificate.linux_readiness_score))) {
-      return Number(certificate.linux_readiness_score);
-    }
+    if (Number.isFinite(Number(certificate.linux_readiness_score))) return Number(certificate.linux_readiness_score);
     return Math.max(0, 100 - safeArray(report.issues).length * 8);
+  }
+
+  function dependencyScore(report) {
+    var certificate = selectedCertificate(report);
+    if (!report) return null;
+    return Number.isFinite(Number(certificate.dependency_lock_score)) ? Number(certificate.dependency_lock_score) : null;
+  }
+
+  function renderGauge(id, score) {
+    var element = byId(id);
+    if (!element) return;
+    var numeric = Number(score);
+    var ready = Number.isFinite(numeric);
+    numeric = ready ? Math.max(0, Math.min(100, numeric)) : 0;
+    var radius = 28;
+    var circumference = 2 * Math.PI * radius;
+    var offset = circumference * (1 - numeric / 100);
+    element.innerHTML = '<svg class="kpi-gauge-svg" viewBox="0 0 68 68" aria-hidden="true"><circle class="kpi-gauge-track" cx="34" cy="34" r="28"></circle><circle class="kpi-gauge-value" cx="34" cy="34" r="28" stroke-dasharray="' + circumference.toFixed(2) + '" stroke-dashoffset="' + offset.toFixed(2) + '"></circle></svg><span>' + (ready ? Math.round(numeric) + "%" : "--") + '</span>';
+    element.setAttribute("aria-label", ready ? Math.round(numeric) + " percent" : "Score pending");
+  }
+
+  function dependencyMetrics(report, certificate) {
+    var source = (report && report.dependency_metrics) || certificate.dependency_metrics || {};
+    return {
+      total: source.total == null ? "--" : source.total,
+      direct: source.direct == null ? "--" : source.direct,
+      transitive: source.transitive == null ? "--" : source.transitive,
+    };
+  }
+
+  function renderKpis() {
+    var report = state.report;
+    var certificate = selectedCertificate(report);
+    var readiness = readinessScore(report);
+    var dependency = dependencyScore(report);
+    renderGauge("readiness-gauge", readiness);
+    renderGauge("dependency-gauge", dependency);
+    setText("readiness-meta", readiness == null ? "Awaiting scan results" : readiness >= 85 ? "Passed all compatibility checks" : "Compatibility checks need review");
+    setText("dependency-meta", dependency == null ? "Lock evidence pending" : dependency >= 85 ? "All dependencies secure and up to date" : "Dependency lock needs review");
+    var metrics = dependencyMetrics(report, certificate);
+    setText("dep-total", metrics.total);
+    setText("dep-direct", metrics.direct);
+    setText("dep-transitive", metrics.transitive);
+    setText("root-hash", certificate.root_hash ? truncate(certificate.root_hash, 19, 0) : "pending");
+    setText("root-meta", certificate.root_hash ? "Immutable build fingerprint" : "Immutable build fingerprint pending");
+    var certified = Boolean(certificate.is_cleanroom_certified || certificate.verified);
+    setText("certificate-meta", certified ? "Cryptographic attestation passed" : "Cryptographic attestation pending");
+    setText("certificate-status", certified ? "SLSA Level 3  /  Reproducible  /  Verified" : "SLSA Level 3  /  Reproducible  /  Pending");
   }
 
   function severityClass(severity) {
@@ -170,18 +228,17 @@
   }
 
   function issueText(issue) {
-    return [issue.category, issue.message, issue.remediation, issue.file_path, safeArray(issue.evidence).join(" ")]
-      .join(" ")
-      .toLowerCase();
+    return [issue.category, issue.message, issue.remediation, issue.file_path, safeArray(issue.evidence).join(" ")].join(" ").toLowerCase();
   }
 
-  function affectedOs(issue) {
+  function affectedPlatforms(issue) {
     var text = issueText(issue);
-    if (text.indexOf("windows") >= 0 || text.indexOf("backslash") >= 0 || text.indexOf("crlf") >= 0 || text.indexOf("host path") >= 0) return "Windows / Linux";
-    if (text.indexOf("mac") >= 0 || text.indexOf("darwin") >= 0) return "macOS / Linux";
-    if (text.indexOf("case") >= 0 || text.indexOf("import") >= 0 || text.indexOf("linux") >= 0) return "Linux ext4";
-    if (text.indexOf("docker") >= 0 || text.indexOf("apt") >= 0 || text.indexOf("compiler") >= 0 || text.indexOf("native") >= 0) return "Linux build";
-    return "Cross-OS";
+    var platforms = [];
+    if (text.indexOf("windows") >= 0 || text.indexOf("backslash") >= 0 || text.indexOf("crlf") >= 0 || text.indexOf("win") >= 0) platforms.push("windows");
+    if (text.indexOf("mac") >= 0 || text.indexOf("darwin") >= 0 || text.indexOf("apple") >= 0) platforms.push("apple");
+    if (text.indexOf("linux") >= 0 || text.indexOf("case") >= 0 || text.indexOf("native") >= 0 || text.indexOf("docker") >= 0 || text.indexOf("apt") >= 0) platforms.push("linux");
+    if (!platforms.length) platforms = ["linux", "windows", "apple"];
+    return platforms.filter(function (platform, index) { return platforms.indexOf(platform) === index; });
   }
 
   function issueIsFixed(issue) {
@@ -189,88 +246,88 @@
     if (!report || !state.auditWasAutoHealed || !report.after_certificate) return false;
     var remaining = safeArray(report.after_certificate.issues);
     if (!remaining.length) return Boolean(report.reproducible || report.after_certificate.is_cleanroom_certified);
-    return !remaining.some(function (item) {
-      return item.issue_id === issue.issue_id;
-    });
+    return !remaining.some(function (item) { return item.issue_id === issue.issue_id; });
   }
 
   function issueLocation(issue) {
-    if (!issue || !issue.file_path) return "target root";
-    return issue.file_path + (issue.line_number ? ":" + issue.line_number : "");
+    return issue && issue.file_path ? issue.file_path + (issue.line_number ? ":" + issue.line_number : "") : "target root";
+  }
+
+  function issueDisplayId(issue, index) {
+    var source = String(issue && issue.issue_id || "");
+    return /^WM-\d+$/i.test(source) ? source.toUpperCase() : "WM-" + String(index + 1).padStart(3, "0");
+  }
+
+  function issueMatches(issue) {
+    var fixed = issueIsFixed(issue);
+    var severity = severityClass(issue.severity);
+    var filterPass = state.issueFilter === "all" || (state.issueFilter === "fixed" && fixed) || (state.issueFilter === severity && severity === state.issueFilter);
+    var query = state.issueSearch.trim().toLowerCase();
+    var queryPass = !query || issueText(issue).indexOf(query) >= 0 || String(issue.issue_id || "").toLowerCase().indexOf(query) >= 0;
+    return filterPass && queryPass;
+  }
+
+  function renderIssueCounts(issues) {
+    var critical = issues.filter(function (issue) { return severityClass(issue.severity) === "critical"; }).length;
+    var high = issues.filter(function (issue) { return severityClass(issue.severity) === "high"; }).length;
+    var fixed = issues.filter(issueIsFixed).length;
+    setText("filter-all-count", issues.length);
+    setText("filter-critical-count", critical);
+    setText("filter-high-count", high);
+    setText("filter-fixed-count", fixed);
   }
 
   function renderIssueList() {
     var list = byId("issue-list");
-    var report = state.report;
-    var issues = report ? safeArray(report.issues) : [];
-    var openIssues = issues.filter(function (issue) { return !issueIsFixed(issue); });
-    setText("landmine-count", issues.length + (issues.length === 1 ? " FINDING" : " FINDINGS"));
+    var issues = state.report ? safeArray(state.report.issues) : [];
     if (!list) return;
-    if (!issues.length) {
-      list.innerHTML = '<div class="empty-state">' + icon(report ? "checkSuccess" : "radarScan", 25) + "<strong>" + (report ? "No landmines detected" : "Awaiting target scan") + "</strong><span>" + (report ? "The scanner found no open portability assumptions in this target." : "Run an audit to classify paths, lockfiles, runtimes, and environment assumptions.") + "</span></div>";
+    renderIssueCounts(issues);
+    var filtered = issues.filter(issueMatches);
+    if (!filtered.length) {
+      list.innerHTML = '<div class="empty-state">' + icon(state.report ? "checkSuccess" : "bug", 25) + '<strong>' + (state.report ? "No matching findings" : "Awaiting repository scan") + '</strong><span>' + (state.report ? "Adjust the issue filter or search term." : "Run Auto-Heal & Certify to load cross-platform evidence.") + '</span></div>';
       hydrateIcons();
       return;
     }
-    list.innerHTML = '<div class="table-scroll"><table class="issues-table"><thead><tr><th>ID</th><th>Severity</th><th>OS affected</th><th>Description</th><th>File / path</th><th>Status</th></tr></thead><tbody>' +
-      issues.map(function (issue) {
-        var severity = severityClass(issue.severity);
-        var fixed = issueIsFixed(issue);
-        var description = issue.remediation || "Review this assumption before moving the build to a clean room.";
-        return '<tr><td><code>' + escapeHtml(issue.issue_id || "WOM-000") + '</code></td><td><span class="severity severity-' + severity + '">' + escapeHtml(severity) + '</span></td><td><span class="os-chip">' + escapeHtml(affectedOs(issue)) + '</span></td><td><div class="issue-desc"><strong>' + escapeHtml(issue.message || "Unclassified issue") + '</strong><span>' + escapeHtml(description) + '</span></div></td><td><span class="issue-path" title="' + escapeHtml(issueLocation(issue)) + '">' + escapeHtml(issueLocation(issue)) + '</span></td><td><span class="issue-status ' + (fixed ? "status-fixed" : "status-open") + '">' + (fixed ? "AUTO-HEALED" : "OPEN") + '</span></td></tr>';
-      }).join("") + '</tbody></table></div>';
-    setText("issues-meta", report ? openIssues.length + " open / " + (issues.length - openIssues.length) + " healed" : "No findings loaded");
-  }
-
-  function renderReadiness() {
-    var panel = byId("readiness-panel");
-    var score = readinessScore(state.report);
-    if (!panel) return;
-    if (score == null) {
-      panel.innerHTML = '<div class="readiness-mini"><div class="readiness-ring"><strong>--</strong><span>%</span></div><div><strong>Waiting for audit</strong><p>Readiness combines landmines, dependency locks, and Linux evidence.</p></div></div>';
-      return;
-    }
-    var headline = score >= 85 ? "Clean room ready" : score >= 60 ? "Needs attention" : "Build risk detected";
-    var copy = score >= 85 ? "The target has strong deterministic evidence and can be promoted with confidence." : "Review the highlighted landmines and rerun auto-heal before promoting this target.";
-    panel.innerHTML = '<div class="readiness-mini"><div class="readiness-ring" style="border-color:' + (score >= 85 ? "var(--teal)" : "var(--amber)") + '"><strong>' + Math.round(score) + '</strong><span>%</span></div><div><strong>' + escapeHtml(headline) + '</strong><p>' + escapeHtml(copy) + '</p></div></div>';
-  }
-
-  function renderTelemetry() {
-    var report = state.report;
-    var score = readinessScore(report);
-    var certificate = report && report.certificate ? report.certificate : {};
-    var issues = report ? safeArray(report.issues) : [];
-    var openIssues = issues.filter(function (issue) { return !issueIsFixed(issue); }).length;
-    var auditLabel = state.busy ? "RUNNING" : report ? "COMPLETE" : "IDLE";
-    setText("readiness-score", score == null ? "--" : Math.round(score) + "%");
-    setText("readiness-meta", score == null ? "Waiting for first audit" : score >= 85 ? "Clean room ready" : "Needs attention");
-    setText("open-issues", report ? openIssues : "--");
-    setText("issues-meta", report ? openIssues + " open / " + (issues.length - openIssues) + " healed" : "No findings loaded");
-    setText("root-hash", certificate.root_hash ? truncate(certificate.root_hash, 7, 4) : "PENDING");
-    setText("root-meta", certificate.root_hash ? "Deterministic certificate root" : "Certificate not generated");
-    setText("audit-state", auditLabel);
-    setText("audit-meta", report ? new Date(report.scanned_at || Date.now()).toLocaleString() : "Awaiting first audit");
-    setText("audit-state-card", auditLabel);
-    setText("audit-meta-card", report ? "Last run " + new Date(report.scanned_at || Date.now()).toLocaleTimeString() : "Select scan to begin");
-    var readinessMeter = byId("readiness-meter");
-    if (readinessMeter) readinessMeter.style.width = (score == null ? 0 : Math.max(0, Math.min(100, score))) + "%";
-    var issuesMeter = byId("issues-meter");
-    if (issuesMeter) issuesMeter.style.width = (issues.length ? Math.min(100, openIssues * 12) : 0) + "%";
-    var auditMeter = byId("audit-meter");
-    if (auditMeter) auditMeter.style.width = state.busy ? "55%" : report ? "100%" : "0%";
-  }
-
-  function renderAnalysis() {
-    var panel = byId("analysis-panel");
-    if (!panel) return;
-    var analysis = state.analysis;
-    if (!analysis && state.report) {
-      analysis = { diagnostics: safeArray(state.report.compiler_diagnostics || state.report.diagnostics), apt_packages: [], apt_install_command: "", root_cause_summary: "Audit diagnostics loaded from the target." };
-    }
-    if (!analysis) return;
-    var packages = safeArray(analysis.apt_packages || analysis.recommended_apt_packages);
-    var command = analysis.apt_install_command || "No apt package additions recommended.";
-    panel.innerHTML = '<div class="analysis-banner">' + icon("cpuCompiler", 15) + '<span>' + escapeHtml(analysis.root_cause_summary || "No root cause summary returned by the parser.") + '</span></div><div class="eyebrow">RECOMMENDED PACKAGES</div><div class="package-cloud">' + (packages.length ? packages.map(function (item) { return '<span class="package-chip">' + escapeHtml(item) + '</span>'; }).join("") : '<span class="muted-text">No package additions recommended.</span>') + '</div><div class="eyebrow">INSTALL COMMAND</div><div class="command-block"><code>' + escapeHtml(command) + '</code><button class="icon-button" type="button" data-copy="' + escapeHtml(command) + '" aria-label="Copy install command">' + icon("copyClipboard", 14) + '</button></div>';
+    list.innerHTML = '<div class="table-scroll"><table class="issues-table"><thead><tr><th>ID</th><th>Severity</th><th>OS affected</th><th>Description</th><th>File / path</th><th>Status</th></tr></thead><tbody>' + filtered.map(function (issue) {
+      var originalIndex = issues.indexOf(issue);
+      var severity = severityClass(issue.severity);
+      var fixed = issueIsFixed(issue);
+      var platforms = affectedPlatforms(issue).map(function (platform) {
+        var names = { linux: "linuxLogo", windows: "windowsLogo", apple: "appleLogo" };
+        return iconClass(names[platform], 15, platform + "-logo", platform);
+      }).join("");
+      var description = issue.remediation || "Review this assumption before moving the build to a clean room.";
+      return '<tr><td><code>' + escapeHtml(issueDisplayId(issue, originalIndex)) + '</code></td><td><span class="severity severity-' + severity + '">' + escapeHtml(severity) + '</span></td><td><span class="os-icons" aria-label="Affected platforms">' + platforms + '</span></td><td><div class="issue-desc"><strong>' + escapeHtml(issue.message || "Unclassified issue") + '</strong><span>' + escapeHtml(description) + '</span></div></td><td><span class="issue-path" title="' + escapeHtml(issueLocation(issue)) + '">' + escapeHtml(issueLocation(issue)) + '</span></td><td><span class="issue-status ' + (fixed ? "status-fixed" : "status-open") + '">' + (fixed ? "FIXED" : "OPEN") + '</span></td></tr>';
+    }).join("") + '</tbody></table></div>';
     hydrateIcons();
+  }
+
+  function renderAuditState() {
+    var report = state.report;
+    var readiness = readinessScore(report);
+    var label = state.busy ? (state.auditWasAutoHealed ? "Auto-Heal & Certify" : "Scanning") : report ? "Complete" : "Ready";
+    setText("audit-state", label);
+    setText("audit-meta", report ? "Last run " + new Date(report.scanned_at || Date.now()).toLocaleTimeString() : "Waiting for run");
+    var checklist = {
+      scan: Boolean(report),
+      dependencies: Boolean(report && dependencyScore(report) != null),
+      tests: Boolean(report && report.certificate),
+      heal: Boolean(report && state.auditWasAutoHealed),
+      build: Boolean(report && report.certificate && (report.reproducible || report.certificate.verified)),
+      certificate: Boolean(report && report.certificate),
+    };
+    document.querySelectorAll("[data-check]").forEach(function (item) {
+      item.classList.toggle("is-pending", !checklist[item.getAttribute("data-check")]);
+    });
+    if (report) {
+      setText("build-diff-count", safeArray(report.unified_diffs).length);
+    }
+    return readiness;
+  }
+
+  function renderReportJson() {
+    var reportNode = byId("report-json");
+    if (reportNode) reportNode.textContent = state.report ? JSON.stringify(state.report, null, 2) : "No audit report loaded.";
   }
 
   function diffText(text) {
@@ -282,6 +339,55 @@
     }).join("\n");
   }
 
+  function parseUnifiedDiff(text) {
+    var left = [];
+    var right = [];
+    String(text || "").split("\n").forEach(function (line) {
+      if (!line || line.indexOf("--- ") === 0 || line.indexOf("+++ ") === 0 || line.indexOf("@@") === 0 || line.indexOf("diff ") === 0 || line.indexOf("index ") === 0) return;
+      if (line.indexOf("-") === 0) left.push({ text: line.slice(1), kind: "removed" });
+      else if (line.indexOf("+") === 0) right.push({ text: line.slice(1), kind: "added" });
+      else if (line.indexOf(" ") === 0) {
+        left.push({ text: line.slice(1), kind: "context" });
+        right.push({ text: line.slice(1), kind: "context" });
+      }
+    });
+    var rows = [];
+    var leftNumber = 0;
+    var rightNumber = 0;
+    var length = Math.max(left.length, right.length);
+    for (var index = 0; index < length; index += 1) {
+      var leftLine = left[index] || { text: "", kind: "empty" };
+      var rightLine = right[index] || { text: "", kind: "empty" };
+      if (leftLine.kind !== "empty") leftNumber += 1;
+      if (rightLine.kind !== "empty") rightNumber += 1;
+      rows.push({ left: leftLine, right: rightLine, leftNumber: leftLine.kind === "empty" ? "" : leftNumber, rightNumber: rightLine.kind === "empty" ? "" : rightNumber });
+    }
+    return rows;
+  }
+
+  function contentDiffRows(before, after) {
+    var oldLines = String(before || "").split("\n");
+    var newLines = String(after || "").split("\n");
+    var rows = [];
+    var length = Math.max(oldLines.length, newLines.length);
+    for (var index = 0; index < length; index += 1) {
+      var oldText = oldLines[index];
+      var newText = newLines[index];
+      rows.push({ left: { text: oldText == null ? "" : oldText, kind: oldText == null ? "empty" : oldText === newText ? "context" : "removed" }, right: { text: newText == null ? "" : newText, kind: newText == null ? "empty" : oldText === newText ? "context" : "added" }, leftNumber: oldText == null ? "" : index + 1, rightNumber: newText == null ? "" : index + 1 });
+    }
+    return rows;
+  }
+
+  function diffLineMarkup(line, number) {
+    var className = line.kind === "removed" ? " is-removed" : line.kind === "added" ? " is-added" : "";
+    var mark = line.kind === "removed" ? "-" : line.kind === "added" ? "+" : "";
+    return '<div class="diff-line' + className + '"><span class="diff-number">' + escapeHtml(number) + '</span><span class="diff-mark">' + mark + '</span><span class="diff-code">' + escapeHtml(line.text) + '</span></div>';
+  }
+
+  function renderSideBySide(rows) {
+    return '<div class="diff-columns"><div class="diff-column"><div class="diff-column-header">Before (broken)</div>' + rows.map(function (row) { return diffLineMarkup(row.left, row.leftNumber); }).join("") + '</div><div class="diff-column"><div class="diff-column-header">After (healed)</div>' + rows.map(function (row) { return diffLineMarkup(row.right, row.rightNumber); }).join("") + '</div></div>';
+  }
+
   function renderDockerfile() {
     var panel = byId("dockerfile-panel");
     var badge = byId("dockerfile-badge");
@@ -289,99 +395,92 @@
     if (!panel || !badge) return;
     var patch = report && (report.dockerfile_patch || safeArray(report.dockerfile_patches)[0]);
     var reportDiffs = report ? safeArray(report.unified_diffs) : [];
-    var patchDiff = patch && (patch.unified_diff || patch.diff) ? [patch.unified_diff || patch.diff] : [];
-    var allDiffs = patchDiff.concat(reportDiffs).filter(function (diff, index, collection) { return diff && collection.indexOf(diff) === index; });
-    var dockerDiffs = allDiffs.filter(function (diff) { return /dockerfile/i.test(diff); });
-    var displayDiffs = dockerDiffs.length ? dockerDiffs : allDiffs;
-    if (!displayDiffs.length) {
-      badge.textContent = report ? "NO PATCH" : "NOT CHECKED";
-      badge.className = "table-count";
-      panel.innerHTML = '<div class="empty-state"><span class="icon-slot" data-icon="fileCode" data-size="25"></span><strong>' + (report ? "No Dockerfile diff returned" : "Dockerfile evidence pending") + '</strong><span>' + (report ? "The audit did not return a Dockerfile repair proposal." : "Run auto-heal to inspect deterministic base images and package layers.") + '</span></div>';
+    var patchDiff = patch && (patch.unified_diff || patch.diff) ? patch.unified_diff || patch.diff : "";
+    var sourceDiff = patchDiff || reportDiffs.filter(function (diff) { return /dockerfile/i.test(diff); })[0] || reportDiffs[0] || "";
+    var rows = patch && (patch.before_content || patch.after_content) ? contentDiffRows(patch.before_content, patch.after_content || patch.patched_content) : parseUnifiedDiff(sourceDiff);
+    if (!rows.length) {
+      badge.textContent = report ? "NO PATCH" : "PENDING";
+      panel.innerHTML = '<div class="empty-state"><span class="icon-slot" data-icon="fileCode" data-size="25"></span><strong>' + (report ? "No Dockerfile diff returned" : "Dockerfile evidence pending") + '</strong><span>' + (report ? "The audit did not return a Dockerfile repair proposal." : "Run auto-heal to inspect the isolated Dockerfile patch.") + '</span></div>';
       hydrateIcons();
+      setText("diff-minus", "-0");
+      setText("diff-plus", "+0");
       return;
     }
-    var applied = Boolean(patch && patch.applied);
-    badge.className = "table-count";
-    badge.textContent = applied ? "APPLIED" : "PATCH READY";
-    var confidence = patch && patch.confidence != null ? "Repair confidence " + Math.round(Number(patch.confidence) * 100) + "%." : "Unified diff evidence from the isolated healing stage.";
-    var changes = patch ? safeArray(patch.changes) : [];
-    var comparisonBanner = state.comparison ? '<div class="analysis-banner">' + icon(state.comparison.merkle_match ? "checkSuccess" : "gitDiff", 15) + '<span>' + (state.comparison.merkle_match ? "Healed certificate matches the baseline root." : "Certificate drift detected after healing.") + '</span></div>' : '';
-    panel.innerHTML = comparisonBanner + '<div class="analysis-banner">' + icon(applied ? "checkSuccess" : "gitDiff", 15) + '<span>' + escapeHtml(confidence) + '</span></div>' + (changes.length ? '<div class="diff-list">' + changes.slice(0, 4).map(function (change) { return '<div class="diff-item"><div class="diff-topline"><span class="diff-title">' + escapeHtml(change) + '</span><span class="pill">changed</span></div></div>'; }).join("") + '</div>' : '') + '<div class="diff-list" style="margin-top:8px">' + displayDiffs.slice(0, 3).map(function (diff) { return '<pre class="diff-code">' + diffText(diff) + '</pre>'; }).join("") + '</div>';
+    var removed = rows.filter(function (row) { return row.left.kind === "removed"; }).length;
+    var added = rows.filter(function (row) { return row.right.kind === "added"; }).length;
+    badge.textContent = patch && patch.applied ? "APPLIED" : "AUTO-HEALED";
+    setText("diff-minus", "-" + removed);
+    setText("diff-plus", "+" + added);
+    var beforeHash = report && report.before_certificate && report.before_certificate.root_hash ? truncate(report.before_certificate.root_hash, 7, 0) : "baseline";
+    var afterHash = selectedCertificate(report).root_hash ? truncate(selectedCertificate(report).root_hash, 7, 0) : "staged";
+    setText("diff-summary", "Auto-healed changes (" + beforeHash + " -> " + afterHash + ")");
+    panel.innerHTML = renderSideBySide(rows);
   }
 
   function renderCertificate() {
-    var report = state.report;
-    var certificate = report && report.certificate;
-    var tree = byId("merkle-tree");
+    var certificate = selectedCertificate(state.report);
     var seal = byId("certificate-seal");
     var metrics = byId("certificate-metrics");
-    if (!tree || !seal || !metrics) return;
-    if (!certificate) {
-      tree.innerHTML = "Merkle root pending";
-      seal.innerHTML = '<div class="empty-state compact-empty"><span class="icon-slot" data-icon="shieldAlert" data-size="22"></span><strong>Certificate pending</strong><span>Generate a deterministic Merkle proof after the audit.</span></div>';
+    var tree = byId("merkle-tree");
+    if (!seal || !metrics || !tree) return;
+    if (!state.report || !certificate.root_hash) {
+      seal.innerHTML = '<div class="empty-state compact-empty"><strong>Certificate pending</strong><span>Generate a deterministic Merkle proof after the audit.</span></div>';
       metrics.innerHTML = '<div class="metric-line"><span>Runtime</span><strong>--</strong></div><div class="metric-line"><span>Lock score</span><strong>--</strong></div><div class="metric-line"><span>Linux readiness</span><strong>--</strong></div>';
-      hydrateIcons();
+      tree.innerHTML = "";
       return;
     }
-    tree.innerHTML = icons.renderMerkleTreeSVG(certificate, state.comparison || { rootHash: certificate.root_hash });
     seal.innerHTML = icons.renderCertificationSeal(certificate);
     metrics.innerHTML = '<div class="metric-line"><span>Runtime</span><strong>' + escapeHtml(certificate.runtime || "unknown") + '</strong></div><div class="metric-line"><span>Lock score</span><strong>' + escapeHtml(numberOr(certificate.dependency_lock_score, 0).toFixed(0) + "%") + '</strong></div><div class="metric-line"><span>Linux readiness</span><strong>' + escapeHtml(numberOr(certificate.linux_readiness_score, 0).toFixed(0) + "%") + '</strong></div>';
-  }
-
-  function renderComparison() {
-    var panel = byId("comparison-panel");
-    if (!panel || !state.comparison) return;
-    var comparison = state.comparison;
-    panel.innerHTML = '<div class="analysis-banner">' + icon(comparison.merkle_match ? "checkSuccess" : "gitDiff", 15) + '<span>' + (comparison.merkle_match ? "The healed certificate matches the baseline root." : "Certificate drift detected. Review modified paths before promotion.") + (comparison.score_delta != null ? " Score delta: " + escapeHtml(comparison.score_delta) + "." : "") + '</span></div>';
-    hydrateIcons();
-  }
-
-  function renderDiagnostics() {
-    var panel = byId("diagnostic-panel");
-    if (!panel) return;
-    var diagnostics = state.analysis ? safeArray(state.analysis.diagnostics) : state.report ? safeArray(state.report.compiler_diagnostics || state.report.diagnostics) : [];
-    if (!diagnostics.length) {
-      panel.innerHTML = "";
-      return;
-    }
-    panel.innerHTML = '<div class="diagnostic-list">' + diagnostics.slice(0, 8).map(function (diagnostic) {
-      var severity = severityClass(diagnostic.severity);
-      var location = diagnostic.file_path ? diagnostic.file_path + (diagnostic.line_number ? ":" + diagnostic.line_number : "") : "build output";
-      return '<article class="diagnostic-row"><div class="diagnostic-topline"><div class="diagnostic-title">' + escapeHtml(diagnostic.message || diagnostic.error_signature || "Compiler diagnostic") + '</div><span class="severity severity-' + severity + '">' + escapeHtml(severity) + '</span></div><p class="diagnostic-message">' + escapeHtml(diagnostic.root_cause_explanation || diagnostic.tool || "normalized compiler output") + '</p><div class="diagnostic-meta">' + escapeHtml(location) + (diagnostic.code ? " / " + escapeHtml(diagnostic.code) : "") + '</div></article>';
-    }).join("") + '</div>';
+    tree.innerHTML = icons.renderMerkleTreeSVG(certificate, state.comparison || { rootHash: certificate.root_hash });
   }
 
   function renderAll() {
-    renderTelemetry();
+    renderKpis();
     renderIssueList();
-    renderReadiness();
-    renderAnalysis();
     renderDockerfile();
     renderCertificate();
-    renderComparison();
-    renderDiagnostics();
+    renderReportJson();
+    renderAuditState();
     hydrateIcons();
   }
 
-  function selectTab(name, shouldScroll) {
-    var tabName = name || "landmines";
-    var targetMap = { landmines: "bugs-panel", apt: "docker-panel", sandbox: "analysis-tool", certificate: "certificate-tool", logs: "logs" };
-    document.querySelectorAll("[data-tab-target]").forEach(function (button) {
-      button.classList.toggle("is-active", button.getAttribute("data-tab-target") === tabName);
+  function setDrawerView(view) {
+    var drawer = byId("detail-drawer");
+    if (!drawer) return;
+    drawer.classList.add("is-open");
+    drawer.setAttribute("aria-hidden", "false");
+    document.querySelectorAll("[data-drawer-view]").forEach(function (panel) {
+      panel.classList.toggle("is-active", panel.getAttribute("data-drawer-view") === view);
     });
-    if (shouldScroll !== false) {
-      var target = byId(targetMap[tabName] || tabName);
-      if (target) target.scrollIntoView({ behavior: "smooth", block: "start" });
-    }
+    var titles = { dependency: ["DEPENDENCY GRAPH / BUILD TELEMETRY", "Compiler Sandbox"], build: ["BUILD & DEPLOY / STAGING", "Isolated Healing Operations"], security: ["SECURITY / PROOF ARTIFACT", "CleanRoom Certificate"], reports: ["REPORTS / AUDIT RECEIPT", "Run Evidence"], settings: ["SETTINGS / LOCAL ENGINE", "Runtime Posture"] };
+    var title = titles[view] || titles.reports;
+    setText("drawer-kicker", title[0]);
+    setText("drawer-title", title[1]);
+    state.activeView = view;
   }
 
-  function setDrawer(open) {
-    var drawer = byId("terminal-drawer");
-    var toggle = byId("drawer-toggle");
+  function closeDrawer() {
+    var drawer = byId("detail-drawer");
     if (!drawer) return;
-    drawer.classList.toggle("is-open", open);
-    drawer.setAttribute("aria-hidden", open ? "false" : "true");
-    if (toggle) toggle.setAttribute("aria-expanded", open ? "true" : "false");
+    drawer.classList.remove("is-open");
+    drawer.setAttribute("aria-hidden", "true");
+    state.activeView = "dashboard";
+    document.querySelectorAll("[data-view]").forEach(function (button) { button.classList.toggle("is-active", button.getAttribute("data-view") === "dashboard"); });
+  }
+
+  function selectView(view) {
+    document.querySelectorAll("[data-view]").forEach(function (button) { button.classList.toggle("is-active", button.getAttribute("data-view") === view); });
+    if (view === "dashboard" || view === "bugs") {
+      closeDrawer();
+      document.querySelectorAll("[data-view]").forEach(function (button) { button.classList.toggle("is-active", button.getAttribute("data-view") === view); });
+      if (view === "bugs") {
+        var panel = byId("bugs-panel");
+        if (panel) panel.classList.add("is-focus");
+        window.setTimeout(function () { if (panel) panel.classList.remove("is-focus"); }, 700);
+      }
+      return;
+    }
+    setDrawerView(view);
   }
 
   async function loadTargets() {
@@ -397,16 +496,15 @@
           var option = document.createElement("option");
           option.value = target;
           option.textContent = target;
-          option.title = targetDescriptions[target] || "Workspace target";
           option.selected = target === state.target;
           select.appendChild(option);
         });
       }
-      setConnection("ENGINE ONLINE", "success");
+      setConnection("All Systems Operational", "success");
       renderTargetDescription();
       logEvent("loaded " + state.targets.length + " target(s)", "success");
     } catch (error) {
-      setConnection("API UNAVAILABLE", "warning");
+      setConnection("API Unavailable", "warning");
       logEvent("target discovery unavailable: " + error.message, "warning");
       showToast("Target discovery is unavailable. The default target remains selected.", false);
     }
@@ -418,45 +516,37 @@
     state.auditWasAutoHealed = Boolean(autoHeal);
     setBusy("scan-button", true);
     setBusy("heal-button", true);
-    setConnection(autoHeal ? "HEALING TARGET" : "AUDITING TARGET", "warning");
-    setText("audit-state", autoHeal ? "HEALING" : "RUNNING");
-    setText("audit-state-card", autoHeal ? "HEALING" : "RUNNING");
-    renderTelemetry();
+    setConnection(autoHeal ? "Auto-Heal Running" : "Scan Running", "warning");
+    renderAll();
     logEvent((autoHeal ? "auto-heal" : "audit") + " started for " + state.target, "info");
     try {
-      var report = await request("/api/v1/audit", { method: "POST", body: { target: state.target, auto_heal: Boolean(autoHeal) } });
-      state.report = report || null;
+      state.report = await request("/api/v1/audit", { method: "POST", body: { target: state.target, auto_heal: Boolean(autoHeal) } });
       state.analysis = null;
       state.comparison = null;
-      setConnection("ENGINE ONLINE", "success");
+      setConnection("All Systems Operational", "success");
       logEvent((autoHeal ? "auto-heal" : "audit") + " complete", "success");
       renderAll();
-      if (!quiet) showToast(autoHeal ? "Auto-heal evidence is ready." : "Target audit is ready.", false);
+      if (!quiet) showToast(autoHeal ? "Auto-heal evidence is ready." : "Repository audit is ready.", false);
     } catch (error) {
-      setConnection("AUDIT FAILED", "error");
-      setText("audit-state", "UNAVAILABLE");
-      setText("audit-state-card", "ERROR");
+      setConnection("Audit Failed", "error");
       logEvent("audit failed: " + error.message, "error");
       if (!quiet) showToast("Audit failed: " + error.message, true);
     } finally {
       state.busy = false;
       setBusy("scan-button", false);
       setBusy("heal-button", false);
-      renderTelemetry();
+      renderAll();
     }
   }
 
   async function parseLog() {
-    if (state.busy) return;
     setBusy("parse-log-button", true);
     logEvent("parsing build log for " + state.target, "info");
     try {
       state.analysis = await request("/api/v1/parse-log", { method: "POST", body: { target: state.target } });
-      setConnection("ENGINE ONLINE", "success");
       logEvent("compiler telemetry received", "success");
       renderAnalysis();
-      renderDiagnostics();
-      selectTab("sandbox", false);
+      setDrawerView("dependency");
       showToast("Compiler telemetry parsed.", false);
     } catch (error) {
       logEvent("parse failed: " + error.message, "error");
@@ -478,7 +568,6 @@
     try {
       state.analysis = await request("/api/v1/parse-log", { method: "POST", body: { log_text: text } });
       renderAnalysis();
-      renderDiagnostics();
       logEvent("custom compiler trace normalized", "success");
       showToast("Custom compiler trace parsed.", false);
     } catch (error) {
@@ -489,9 +578,24 @@
     }
   }
 
+  function renderAnalysis() {
+    var panel = byId("analysis-panel");
+    if (!panel || !state.analysis) return;
+    var analysis = state.analysis;
+    var packages = safeArray(analysis.apt_packages || analysis.recommended_apt_packages);
+    var command = analysis.apt_install_command || "No apt package additions recommended.";
+    panel.innerHTML = '<div class="analysis-banner">' + icon("cpuCompiler", 15) + '<span>' + escapeHtml(analysis.root_cause_summary || "No root cause summary returned by the parser.") + '</span></div><div class="drawer-kicker">RECOMMENDED PACKAGES</div><div class="package-cloud">' + (packages.length ? packages.map(function (item) { return '<span class="package-chip">' + escapeHtml(item) + '</span>'; }).join("") : '<span class="muted-text">No package additions recommended.</span>') + '</div><div class="drawer-kicker">INSTALL COMMAND</div><div class="command-block"><code>' + escapeHtml(command) + '</code><button class="icon-button" type="button" data-copy="' + escapeHtml(command) + '" aria-label="Copy install command">' + icon("copyClipboard", 14) + '</button></div><div id="diagnostic-panel"></div>';
+    var diagnosticPanel = byId("diagnostic-panel");
+    var diagnostics = safeArray(analysis.diagnostics);
+    if (diagnosticPanel && diagnostics.length) {
+      diagnosticPanel.innerHTML = '<div class="diagnostic-list">' + diagnostics.slice(0, 8).map(function (diagnostic) { return '<article class="diagnostic-row"><div class="diagnostic-topline"><div class="diagnostic-title">' + escapeHtml(diagnostic.message || diagnostic.error_signature || "Compiler diagnostic") + '</div><span class="severity severity-' + severityClass(diagnostic.severity) + '">' + escapeHtml(diagnostic.severity || "high") + '</span></div><p class="diagnostic-message">' + escapeHtml(diagnostic.root_cause_explanation || diagnostic.tool || "normalized compiler output") + '</p><div class="diagnostic-meta">' + escapeHtml(diagnostic.file_path || "build output") + '</div></article>'; }).join("") + '</div>';
+    }
+    hydrateIcons();
+  }
+
   function downloadCertificate() {
-    var certificate = state.report && state.report.certificate;
-    if (!certificate) {
+    var certificate = selectedCertificate(state.report);
+    if (!certificate.root_hash) {
       showToast("Generate a certificate first.", true);
       return;
     }
@@ -513,10 +617,8 @@
       if (!state.report) state.report = { target: state.target, issues: [] };
       state.report.certificate = certificate;
       state.report.merkle_root = certificate.root_hash;
-      setConnection("ENGINE ONLINE", "success");
       logEvent("certificate generated", "success");
       renderAll();
-      selectTab("certificate", false);
       showToast("Certificate evidence is ready.", false);
     } catch (error) {
       logEvent("certificate failed: " + error.message, "error");
@@ -529,26 +631,26 @@
   async function compare() {
     if (state.busy) return;
     setBusy("compare-button", true);
+    setBusy("build-compare-button", true);
     logEvent("comparing baseline and healed certificates", "info");
     try {
       state.comparison = await request("/api/v1/compare", { method: "POST", body: { target: state.target, auto_heal: true } });
       logEvent("comparison evidence received", "success");
-      renderDockerfile();
-      renderComparison();
-      selectTab("apt", false);
+      renderCertificate();
       showToast("Certificate comparison is ready.", false);
     } catch (error) {
       logEvent("comparison failed: " + error.message, "error");
       showToast("Comparison failed: " + error.message, true);
     } finally {
       setBusy("compare-button", false);
+      setBusy("build-compare-button", false);
     }
   }
 
-  async function copyText(value) {
+  async function copyText(value, successMessage) {
     try {
       await navigator.clipboard.writeText(value);
-      showToast("Copied to clipboard.", false);
+      showToast(successMessage || "Copied to clipboard.", false);
     } catch (error) {
       showToast("Clipboard access is unavailable.", true);
     }
@@ -560,12 +662,21 @@
     on("parse-log-button", "click", parseLog);
     on("run-sandbox-button", "click", parseCustomLog);
     on("certify-button", "click", certify);
-    on("copy-certificate-button", "click", function () {
-      var certificate = state.report && state.report.certificate;
-      if (certificate) copyText(JSON.stringify(certificate, null, 2)); else showToast("Generate a certificate first.", true);
-    });
-    on("download-certificate-button", "click", downloadCertificate);
     on("compare-button", "click", compare);
+    on("build-compare-button", "click", compare);
+    on("download-certificate-button", "click", downloadCertificate);
+    on("copy-root-button", "click", function () {
+      var root = selectedCertificate(state.report).root_hash;
+      if (root) copyText(root, "Merkle root copied."); else showToast("Generate a certificate first.", true);
+    });
+    on("copy-certificate-button", "click", function () {
+      var certificate = selectedCertificate(state.report);
+      if (certificate.root_hash) copyText(JSON.stringify(certificate, null, 2), "Certificate JSON copied."); else showToast("Generate a certificate first.", true);
+    });
+    on("copy-report-button", "click", function () { if (state.report) copyText(JSON.stringify(state.report, null, 2), "Audit report copied."); else showToast("Run an audit first.", true); });
+    on("view-file-button", "click", function () { setDrawerView("build"); });
+    on("drawer-close", "click", closeDrawer);
+    on("terminal-toggle", "click", function () { setDrawerView("reports"); });
     on("target-select", "change", function (event) {
       state.target = event.target.value || "nightmare_ml_service";
       state.report = null;
@@ -577,27 +688,21 @@
       logEvent("target changed to " + state.target, "info");
       runAudit(false, false);
     });
-    document.querySelectorAll("[data-refresh-audit]").forEach(function (button) {
-      button.addEventListener("click", function () { runAudit(false, false); });
-    });
-    document.querySelectorAll("[data-log-preset]").forEach(function (button) {
+    on("issue-search", "input", function (event) { state.issueSearch = event.target.value || ""; renderIssueList(); });
+    document.querySelectorAll("[data-issue-filter]").forEach(function (button) {
       button.addEventListener("click", function () {
-        var editor = byId("compiler-log-editor");
-        if (editor) editor.value = logPresets[button.getAttribute("data-log-preset")] || "";
-        selectTab("sandbox", false);
+        state.issueFilter = button.getAttribute("data-issue-filter") || "all";
+        document.querySelectorAll("[data-issue-filter]").forEach(function (item) { item.classList.toggle("is-active", item === button); });
+        renderIssueList();
       });
     });
-    document.querySelectorAll("[data-tab-target]").forEach(function (button) {
-      button.addEventListener("click", function () { selectTab(button.getAttribute("data-tab-target"), true); });
+    on("issue-filter-button", "click", function () {
+      state.issueFilter = state.issueFilter === "all" ? "fixed" : "all";
+      document.querySelectorAll("[data-issue-filter]").forEach(function (item) { item.classList.toggle("is-active", item.getAttribute("data-issue-filter") === state.issueFilter); });
+      renderIssueList();
     });
-    on("terminal-toggle", "click", function () {
-      setDrawer(true);
-      selectTab("logs", true);
-    });
-    on("drawer-toggle", "click", function () {
-      var drawer = byId("terminal-drawer");
-      setDrawer(!drawer || !drawer.classList.contains("is-open"));
-    });
+    document.querySelectorAll("[data-view]").forEach(function (button) { button.addEventListener("click", function () { selectView(button.getAttribute("data-view")); }); });
+    document.querySelectorAll("[data-log-preset]").forEach(function (button) { button.addEventListener("click", function () { var editor = byId("compiler-log-editor"); if (editor) editor.value = logPresets[button.getAttribute("data-log-preset")] || ""; }); });
     document.addEventListener("click", function (event) {
       var copyButton = event.target.closest ? event.target.closest("[data-copy]") : null;
       if (copyButton) copyText(copyButton.getAttribute("data-copy") || "");
@@ -620,7 +725,7 @@
     parseLog: parseLog,
     certify: certify,
     compare: compare,
-    selectTab: selectTab,
+    selectView: selectView,
   };
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", bootstrap); else bootstrap();

@@ -40,7 +40,7 @@
       '<linearGradient id="' +
       ids.gradient +
       '" x1="4" y1="3" x2="21" y2="22" gradientUnits="userSpaceOnUse">' +
-      '<stop stop-color="#8B7CFF"/><stop offset="0.52" stop-color="#50D8FF"/><stop offset="1" stop-color="#5DE3A1"/>' +
+      '<stop stop-color="#22D3EE"/><stop offset="0.52" stop-color="#10B981"/><stop offset="1" stop-color="#34D399"/>' +
       "</linearGradient>" +
       '<filter id="' +
       ids.glow +
@@ -125,6 +125,52 @@
     envKey: iconFactory(
       '<circle cx="8.2" cy="12" r="4.4"/><path d="m11.5 15.2 7.7 5.2M15.2 17.8l1.8-2.4M17.7 19.5l1.8-2.4"/>'
     ),
+    dashboard: iconFactory(
+      '<rect x="3.2" y="3.2" width="7.1" height="7.1" rx="1"/><rect x="13.7" y="3.2" width="7.1" height="7.1" rx="1"/><rect x="3.2" y="13.7" width="7.1" height="7.1" rx="1"/><rect x="13.7" y="13.7" width="7.1" height="7.1" rx="1"/>'
+    ),
+    bug: iconFactory(
+      '<path d="M9 7.2h6a3 3 0 0 1 3 3v4.7a6 6 0 0 1-12 0v-4.7a3 3 0 0 1 3-3Z"/><path d="M12 4.2v3M8.5 4.7l1.6 2.1M15.5 4.7l-1.6 2.1M5.2 10.2H2.8M21.2 10.2h-2.4M5.2 14.5H2.8M21.2 14.5h-2.4M9.5 20.1l-1.2 1.7M14.5 20.1l1.2 1.7"/>'
+    ),
+    dependencyGraph: iconFactory(
+      '<circle cx="5" cy="12" r="2.2"/><circle cx="18.8" cy="5.3" r="2.2"/><circle cx="18.8" cy="18.7" r="2.2"/><path d="m7 11 9.8-5M7 13l9.8 5"/>'
+    ),
+    buildDeploy: iconFactory(
+      '<path d="m13.7 3.1-8.5 8.5 3.2 3.2 8.5-8.5zM11.4 16.1l-3.2-3.2M14.8 6.1l3.2 3.2M5.2 15.5l3.3 3.3M3.1 20.9l2.1-2.1"/>'
+    ),
+    reports: iconFactory(
+      '<path d="M6 2.8h8l4 4v14.4H6zM14 2.8v4h4M9.2 11.2h5.6M9.2 14.8h5.6M9.2 18.4h3.4"/>'
+    ),
+    settings: iconFactory(
+      '<circle cx="12" cy="12" r="3.1"/><path d="M19.1 13.8a7.3 7.3 0 0 0 0-3.6l2-1.5-2-3.4-2.4 1a7.4 7.4 0 0 0-3.1-1.8L13.3 2h-3.9l-.3 2.5A7.4 7.4 0 0 0 6 6.3l-2.4-1-2 3.4 2 1.5a7.3 7.3 0 0 0 0 3.6l-2 1.5 2 3.4 2.4-1a7.4 7.4 0 0 0 3.1 1.8l.3 2.5h3.9l.3-2.5a7.4 7.4 0 0 0 3.1-1.8l2.4 1 2-3.4z"/>'
+    ),
+    github: iconFactory(
+      '<path d="M12 3.2a8.8 8.8 0 0 0-2.8 17.1c.4.1.6-.2.6-.4v-1.6c-2.5.5-3-.9-3-.9-.4-1-.9-1.2-.9-1.2-.8-.5.1-.5.1-.5.9.1 1.3.9 1.3.9.8 1.3 2.1.9 2.6.7.1-.6.3-.9.6-1.2-2-.2-4.1-1-4.1-4.4 0-1 .4-1.8.9-2.4-.1-.2-.4-1.1.1-2.3 0 0 .8-.2 2.4.9a8.2 8.2 0 0 1 4.4 0c1.6-1.1 2.4-.9 2.4-.9.5 1.2.2 2.1.1 2.3.6.6.9 1.4.9 2.4 0 3.4-2.1 4.2-4.1 4.4.3.3.6.8.6 1.6v2.3c0 .2.2.5.6.4A8.8 8.8 0 0 0 12 3.2Z"/>'
+    ),
+    chevronDown: iconFactory('<path d="m5.5 9 6.5 6 6.5-6"/>'),
+    scanRepo: iconFactory(
+      '<path d="M5 3.5H3.5V8M19 3.5h1.5V8M5 20.5H3.5V16M19 20.5h1.5V16M8 12h8M12 8v8"/>'
+    ),
+    linuxLogo: iconFactory(
+      '<path d="M12.1 3.2c-2.2 0-3.5 2.1-3.5 4.6 0 1.4-.5 2.5-1.4 3.7-.9 1.2-2.4 2.1-2.2 4 .2 1.6 1.8 2.4 3.2 1.6 1-.6 1.8-1.2 3.5-1.1 1.7-.1 2.5.5 3.5 1.1 1.4.8 3-.1 3.2-1.6.2-1.9-1.3-2.8-2.2-4-.9-1.2-1.4-2.3-1.4-3.7 0-2.5-1.3-4.6-2.7-4.6Z"/><path d="M9.2 8.7h.1M14.8 8.7h.1M9.4 13.5c1.7 1 3.5 1 5.2 0M6.8 18.2l-1.2 2M17.2 18.2l1.2 2"/>'
+    ),
+    windowsLogo: iconFactory(
+      '<path d="M3.3 4.4 11 3.3v8.1H3.3zM13 3l7.7-1v9.4H13zM3.3 12.6H11v8.1l-7.7-1.1zM13 12.6h7.7V22l-7.7-1z"/>'
+    ),
+    appleLogo: iconFactory(
+      '<path d="M15.8 6.2c.8-1 .8-2 .8-2.5-1 .1-2.1.7-2.7 1.4-.6.7-1 1.8-.9 2.4 1 .1 2.1-.5 2.8-1.3ZM18.8 13.1c0-2.4 2-3.6 2-3.7-1.1-1.6-2.8-1.8-3.4-1.8-1.5-.2-2.9.9-3.7.9-.8 0-2-.9-3.3-.9-1.7 0-3.3 1-4.2 2.5-1.8 3-.5 7.4 1.3 9.8.9 1.2 1.9 2.5 3.3 2.4 1.3-.1 1.8-.8 3.4-.8s2 .8 3.4.8c1.4 0 2.3-1.2 3.2-2.4 1-1.4 1.4-2.8 1.4-2.9-.1 0-3.4-1.3-3.4-3.9Z"/>'
+    ),
+    branch: iconFactory(
+      '<path d="M7 4.3v11.4a4.3 4.3 0 0 0 4.3 4.3H17M7 4.3a2 2 0 1 0 0 .1M17 20a2 2 0 1 0 0 .1M7 9.1h4.2a5.8 5.8 0 0 0 5.8-5.8V4"/>'
+    ),
+    cleanRoomCrest: iconFactory(
+      '<path d="m12 1.8 8.5 4.9v9.8L12 21.3l-8.5-4.8V6.7z"/><path d="m12 4.2 6 3.5v6.9l-6 3.5-6-3.5V7.7z"/><path d="m8.6 12.1 2.2 2.2 4.7-4.8"/><text x="12" y="3.7" text-anchor="middle" font-size="1.7" fill="#34D399" stroke="none">CLEANROOM</text><text x="12" y="20.7" text-anchor="middle" font-size="1.7" fill="#34D399" stroke="none">CERTIFIED</text>'
+    ),
+    gitMerge: iconFactory(
+      '<path d="M7 4v16M17 4v6a5 5 0 0 1-5 5H7"/><circle cx="7" cy="4" r="2"/><circle cx="17" cy="4" r="2"/><circle cx="7" cy="20" r="2"/>'
+    ),
+    search: iconFactory('<circle cx="10.7" cy="10.7" r="6.2"/><path d="m15.3 15.3 5 5"/>'),
+    filter: iconFactory('<path d="M3.5 5h17L14 12v6l-4 2v-8z"/>'),
+    close: iconFactory('<path d="m6 6 12 12M18 6 6 18"/>'),
     chevronRight: iconFactory('<path d="m9 5 7 7-7 7"/>'),
   };
 
@@ -169,9 +215,9 @@
       escapeHtml(size) +
       '" fill="none" xmlns="http://www.w3.org/2000/svg">' +
       "<defs>" +
-      '<linearGradient id="' +
-      ids.gradient +
-      '" x1="18" y1="8" x2="94" y2="102" gradientUnits="userSpaceOnUse"><stop stop-color="#8B7CFF"/><stop offset="0.55" stop-color="#50D8FF"/><stop offset="1" stop-color="#5DE3A1"/></linearGradient>' +
+       '<linearGradient id="' +
+       ids.gradient +
+       '" x1="18" y1="8" x2="94" y2="102" gradientUnits="userSpaceOnUse"><stop stop-color="#22D3EE"/><stop offset="0.55" stop-color="#10B981"/><stop offset="1" stop-color="#34D399"/></linearGradient>' +
       '<filter id="' +
       ids.glow +
       '" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="2" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>' +
@@ -313,9 +359,9 @@
       height +
       '" role="img" aria-label="Merkle evidence tree" fill="none" xmlns="http://www.w3.org/2000/svg">' +
       "<defs>" +
-      '<linearGradient id="' +
-      ids.gradient +
-      '" x1="80" y1="30" x2="450" y2="160" gradientUnits="userSpaceOnUse"><stop stop-color="#8B7CFF"/><stop offset="0.55" stop-color="#50D8FF"/><stop offset="1" stop-color="#5DE3A1"/></linearGradient>' +
+       '<linearGradient id="' +
+       ids.gradient +
+       '" x1="80" y1="30" x2="450" y2="160" gradientUnits="userSpaceOnUse"><stop stop-color="#22D3EE"/><stop offset="0.55" stop-color="#10B981"/><stop offset="1" stop-color="#34D399"/></linearGradient>' +
       '<filter id="' +
       ids.glow +
       '" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="2" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>' +

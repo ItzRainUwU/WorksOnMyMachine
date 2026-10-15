@@ -6,6 +6,8 @@ import shutil
 import tempfile
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
 from . import __version__
@@ -32,6 +34,16 @@ app = FastAPI(
     description="Cross-OS reproducibility diagnostics and deterministic build evidence.",
     version=__version__,
 )
+
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+@app.get("/", include_in_schema=False)
+def dashboard() -> FileResponse:
+    """Serve the self-contained CleanRoom engineering dashboard."""
+
+    return FileResponse(STATIC_DIR / "index.html", media_type="text/html")
 
 
 class TargetRequest(BaseModel):

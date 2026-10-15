@@ -1,23 +1,24 @@
 # WorksOnMyMachine
 
-WorksOnMyMachine is an autonomous Cross-OS (Windows/macOS-to-Linux)  
-reproducibility platform for the Frontier Buildathon 2026 Developer Tools &  
-Open Source track. Phase 1 establishes the clean-Linux foundation and ships  
-three deliberately broken repositories for later diagnosis.
+WorksOnMyMachine is an autonomous Cross-OS (Windows/macOS-to-Linux)
+reproducibility platform for the Frontier Buildathon 2026 Developer Tools &
+Open Source track. The final Phase 5 build includes a self-contained CleanRoom
+cyber-engineering dashboard, deterministic certificate evidence, and three
+deliberately broken repositories for repeatable diagnosis.
 
 ## Architecture
 
 ```text
                         +-----------------------------+
-                        | FastAPI service              |
-                        | /health, /api/v1/targets    |
+                         | Dashboard + FastAPI API      |
+                         | local SVG control plane      |
                         +--------------+--------------+
                                        |
                     +------------------+------------------+
                     |                                     |
           +---------v----------+                +---------v----------+
           | Scanner engine    |                | Evidence engine    |
-          | Phase 2            |                | Phase 5            |
+          | Phase 2            |                | CleanRoom proof    |
           | landmines/logs     |                | Merkle certificates|
           +---------+----------+                +--------------------+
                     |
@@ -27,10 +28,10 @@ three deliberately broken repositories for later diagnosis.
           +--------------------+                +--------------------+
 ```
 
-The repository is intentionally split into a `src/` package, local-only tests,  
-and `demo_targets/` fixtures. Phase 1 does not call external APIs or execute  
-untrusted target code. Target paths cross the API boundary only as normalized  
-POSIX-relative paths.
+The repository is intentionally split into a `src/` package, local-only tests,
+and `demo_targets/` fixtures. The dashboard and engine do not call external APIs
+by default or execute untrusted target code. Target paths cross the API boundary
+only as normalized POSIX-relative paths.
 
 ## Requirements
 
@@ -58,7 +59,7 @@ configuration template only if you need to override defaults:
 cp .env.example .env
 ```
 
-No API keys are needed for the Phase 1 service or tests.
+No API keys are needed for the service, dashboard, or tests.
 
 The Phase 3 compiler parser is deterministic and offline-first. `LLM_API_KEY`
 is optional; when configured, the hybrid analyzer may enrich the local result
@@ -119,9 +120,19 @@ The certificate Merkle root contains only normalized file content and relative
 POSIX paths. Filesystem timestamps, ownership, inode values, and enumeration
 order are deliberately excluded.
 
+## Dashboard
+
+Run the API and open `http://127.0.0.1:8000/`. The dashboard is served from
+the local package and has no CDN, icon font, or external JavaScript dependency.
+It includes custom inline SVG telemetry, landmine and compiler views, Dockerfile
+diffs, Merkle evidence, CleanRoom certificates, target selection, copy actions,
+and a live audit telemetry drawer.
+
 ## Docker build and run
 
 ```bash
+docker build --tag worksonmymachine:phase5 .
+docker run --rm --publish 8000:8000 worksonmymachine:phase5
 ```
 
 The image uses `python:3.11.9-slim`, installs the pinned requirements, runs as
@@ -142,28 +153,45 @@ Equivalent direct invocation:
 python -m pytest
 ```
 
-The foundation suite validates every public Pydantic schema, relative-path
-safety, safe environment defaults, and both initial API endpoints. It does not
-make network calls or require external credentials.
+The suite validates public Pydantic schemas, relative-path safety, scanner and
+healer behavior, compiler parsing, Merkle determinism, CLI commands, dashboard
+assets, API workflows, and demo-target immutability. It does not make network
+calls or require external credentials.
 
-## Phase 1 demo targets
+## API reference
+
+The FastAPI OpenAPI page is available at `/docs` while the server is running.
+
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| `GET` | `/` | Serve the local CleanRoom dashboard |
+| `GET` | `/api/v1/targets` | List available target repositories |
+| `POST` | `/api/v1/scan` | Scan landmines without modifying a target |
+| `POST` | `/api/v1/parse-log` | Parse a target or raw compiler log |
+| `POST` | `/api/v1/heal` | Heal source/config files in staging |
+| `POST` | `/api/v1/heal-dockerfile` | Harden a staged Dockerfile |
+| `POST` | `/api/v1/certify` | Generate a deterministic certificate |
+| `POST` | `/api/v1/compare` | Compare certificate file and score drift |
+| `POST` | `/api/v1/audit` | Run the unified audit/heal workflow |
+
+## Demo targets
 
 - `demo_targets/nightmare_ml_service/` — Windows paths, a missing model-bucket
   environment variable, CRLF shell input, an unpinned Python image, and native
   ML/PostgreSQL runtime failures.
 - `demo_targets/case_sensitive_webapp/` — Python and JavaScript import casing
   that appears to work on case-insensitive filesystems but fails on Linux, plus
-  unpinned Python dependencies.
+  unpinned Python dependencies and a floating Docker base image.
 - `demo_targets/rust_crypto_worker/` — native `libffi`/OpenSSL header failures,
   a missing Cargo toolchain scenario, and an intentionally stale lockfile.
 
-Each target contains a simulated `build_error.log`. The fixtures are evidence
-for future scanner and healer phases; they are not expected to pass their own
-builds in Phase 1.
+Each target contains a simulated `build_error.log`. The fixtures intentionally
+remain broken; the scanner and healers operate on copy-on-write staging output
+and never overwrite these source repositories.
 
 ## Reproducibility policy
 
-All runtime inputs needed to rebuild the Phase 1 service live in this
+All runtime inputs needed to rebuild the service live in this
 repository. Paths are resolved from `Path(__file__).resolve().parent` and
 project-relative descendants; no workstation-specific absolute path is stored
 in the application. Secrets belong in ignored `.env` files and are never

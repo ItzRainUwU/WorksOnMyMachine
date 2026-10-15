@@ -8,14 +8,14 @@
     report: null,
     analysis: null,
     comparison: null,
-    activeTab: "landmines",
+    auditWasAutoHealed: false,
     events: [{ message: "clean room ready", level: "success" }],
     busy: false,
     toastTimer: null,
   };
 
   var targetDescriptions = {
-    nightmare_ml_service: "Windows path, CRLF, and native wheel failure fixture.",
+    nightmare_ml_service: "Windows paths, CRLF, native wheels, and Dockerfile drift.",
     case_sensitive_webapp: "Case-folded Python and JavaScript imports on Linux ext4.",
     rust_crypto_worker: "Rust, libffi, OpenSSL, and stale lockfile fixture.",
   };
@@ -30,6 +30,11 @@
 
   function byId(id) {
     return document.getElementById(id);
+  }
+
+  function on(id, eventName, handler) {
+    var element = byId(id);
+    if (element) element.addEventListener(eventName, handler);
   }
 
   function escapeHtml(value) {
@@ -68,10 +73,8 @@
   }
 
   function renderTargetDescription() {
-    setText(
-      "target-description",
-      targetDescriptions[state.target] || "Workspace target selected for deterministic audit."
-    );
+    var select = byId("target-select");
+    if (select) select.title = targetDescriptions[state.target] || "Workspace target";
   }
 
   function setConnection(label, tone) {
@@ -97,7 +100,7 @@
 
   function logEvent(message, level) {
     state.events.push({ message: String(message), level: level || "info" });
-    if (state.events.length > 24) state.events = state.events.slice(-24);
+    if (state.events.length > 28) state.events = state.events.slice(-28);
     renderTerminal();
   }
 
@@ -107,7 +110,8 @@
     output.textContent = state.events
       .map(function (entry) {
         var stamp = new Date().toISOString().slice(11, 19);
-        return "[" + stamp + "] " + entry.message;
+        var tag = String(entry.level || "info").toUpperCase();
+        return "[" + stamp + "] [" + tag + "] " + entry.message;
       })
       .join("\n");
     output.scrollTop = output.scrollHeight;
@@ -143,13 +147,12 @@
     return payload;
   }
 
-  function setBusy(buttonId, busy, label) {
+  function setBusy(buttonId, busy) {
     var button = byId(buttonId);
     if (!button) return;
     button.disabled = Boolean(busy);
     button.classList.toggle("is-loading", Boolean(busy));
     button.setAttribute("aria-busy", busy ? "true" : "false");
-    if (label) setText(buttonId, label);
   }
 
   function readinessScore(report) {
@@ -158,65 +161,64 @@
     if (Number.isFinite(Number(certificate.linux_readiness_score))) {
       return Number(certificate.linux_readiness_score);
     }
-    var issues = safeArray(report.issues).length;
-    return Math.max(0, 100 - issues * 8);
+    return Math.max(0, 100 - safeArray(report.issues).length * 8);
   }
 
   function severityClass(severity) {
     var normalized = String(severity || "medium").toLowerCase();
-    return ["low", "medium", "high", "critical"].indexOf(normalized) >= 0
-      ? normalized
-      : "medium";
+    return ["low", "medium", "high", "critical"].indexOf(normalized) >= 0 ? normalized : "medium";
+  }
+
+  function issueText(issue) {
+    return [issue.category, issue.message, issue.remediation, issue.file_path, safeArray(issue.evidence).join(" ")]
+      .join(" ")
+      .toLowerCase();
+  }
+
+  function affectedOs(issue) {
+    var text = issueText(issue);
+    if (text.indexOf("windows") >= 0 || text.indexOf("backslash") >= 0 || text.indexOf("crlf") >= 0 || text.indexOf("host path") >= 0) return "Windows / Linux";
+    if (text.indexOf("mac") >= 0 || text.indexOf("darwin") >= 0) return "macOS / Linux";
+    if (text.indexOf("case") >= 0 || text.indexOf("import") >= 0 || text.indexOf("linux") >= 0) return "Linux ext4";
+    if (text.indexOf("docker") >= 0 || text.indexOf("apt") >= 0 || text.indexOf("compiler") >= 0 || text.indexOf("native") >= 0) return "Linux build";
+    return "Cross-OS";
+  }
+
+  function issueIsFixed(issue) {
+    var report = state.report;
+    if (!report || !state.auditWasAutoHealed || !report.after_certificate) return false;
+    var remaining = safeArray(report.after_certificate.issues);
+    if (!remaining.length) return Boolean(report.reproducible || report.after_certificate.is_cleanroom_certified);
+    return !remaining.some(function (item) {
+      return item.issue_id === issue.issue_id;
+    });
+  }
+
+  function issueLocation(issue) {
+    if (!issue || !issue.file_path) return "target root";
+    return issue.file_path + (issue.line_number ? ":" + issue.line_number : "");
   }
 
   function renderIssueList() {
     var list = byId("issue-list");
     var report = state.report;
     var issues = report ? safeArray(report.issues) : [];
-    setText("landmine-count", issues.length + (issues.length === 1 ? " finding" : " findings"));
+    var openIssues = issues.filter(function (issue) { return !issueIsFixed(issue); });
+    setText("landmine-count", issues.length + (issues.length === 1 ? " FINDING" : " FINDINGS"));
     if (!list) return;
     if (!issues.length) {
-      list.innerHTML =
-        '<div class="empty-state">' +
-        icon(report ? "checkSuccess" : "radarScan", 24) +
-        "<strong>" +
-        (report ? "No landmines detected" : "Awaiting target scan") +
-        "</strong><span>" +
-        (report
-          ? "The scanner found no open portability assumptions in this target."
-          : "Run an audit to classify paths, lockfiles, runtimes, and environment assumptions.") +
-        "</span></div>";
+      list.innerHTML = '<div class="empty-state">' + icon(report ? "checkSuccess" : "radarScan", 25) + "<strong>" + (report ? "No landmines detected" : "Awaiting target scan") + "</strong><span>" + (report ? "The scanner found no open portability assumptions in this target." : "Run an audit to classify paths, lockfiles, runtimes, and environment assumptions.") + "</span></div>";
+      hydrateIcons();
       return;
     }
-    list.innerHTML = issues
-      .map(function (issue) {
+    list.innerHTML = '<div class="table-scroll"><table class="issues-table"><thead><tr><th>ID</th><th>Severity</th><th>OS affected</th><th>Description</th><th>File / path</th><th>Status</th></tr></thead><tbody>' +
+      issues.map(function (issue) {
         var severity = severityClass(issue.severity);
-        var location = issue.file_path
-          ? issue.file_path + (issue.line_number ? ":" + issue.line_number : "")
-          : "target root";
-        var evidence = safeArray(issue.evidence).slice(0, 2);
-        return (
-          '<article class="issue-row"><div class="issue-topline"><div class="issue-title">' +
-          escapeHtml(issue.message || issue.issue_id || "Unclassified issue") +
-          '</div><span class="severity severity-' +
-          severity +
-          '">' +
-          escapeHtml(severity) +
-          '</span></div><p class="issue-message">' +
-          escapeHtml(issue.remediation || "Review this assumption before moving the build to a clean room.") +
-          '</p><div class="issue-meta"><code>' +
-          escapeHtml(location) +
-          "</code>" +
-          (issue.category ? "<span>" + escapeHtml(issue.category) + "</span>" : "") +
-          evidence
-            .map(function (item) {
-              return "<span>" + escapeHtml(item) + "</span>";
-            })
-            .join("") +
-          "</div></article>"
-        );
-      })
-      .join("");
+        var fixed = issueIsFixed(issue);
+        var description = issue.remediation || "Review this assumption before moving the build to a clean room.";
+        return '<tr><td><code>' + escapeHtml(issue.issue_id || "WOM-000") + '</code></td><td><span class="severity severity-' + severity + '">' + escapeHtml(severity) + '</span></td><td><span class="os-chip">' + escapeHtml(affectedOs(issue)) + '</span></td><td><div class="issue-desc"><strong>' + escapeHtml(issue.message || "Unclassified issue") + '</strong><span>' + escapeHtml(description) + '</span></div></td><td><span class="issue-path" title="' + escapeHtml(issueLocation(issue)) + '">' + escapeHtml(issueLocation(issue)) + '</span></td><td><span class="issue-status ' + (fixed ? "status-fixed" : "status-open") + '">' + (fixed ? "AUTO-HEALED" : "OPEN") + '</span></td></tr>';
+      }).join("") + '</tbody></table></div>';
+    setText("issues-meta", report ? openIssues.length + " open / " + (issues.length - openIssues.length) + " healed" : "No findings loaded");
   }
 
   function renderReadiness() {
@@ -224,35 +226,12 @@
     var score = readinessScore(state.report);
     if (!panel) return;
     if (score == null) {
-      panel.innerHTML =
-        '<div class="empty-state"><span class="icon-slot" data-icon="radarScan" data-size="24"></span><strong>Readiness pending</strong><span>The first audit will combine landmines, dependency lock evidence, and Linux readiness.</span></div>';
-      hydrateIcons();
+      panel.innerHTML = '<div class="readiness-mini"><div class="readiness-ring"><strong>--</strong><span>%</span></div><div><strong>Waiting for audit</strong><p>Readiness combines landmines, dependency locks, and Linux evidence.</p></div></div>';
       return;
     }
-    var report = state.report || {};
-    var certificate = report.certificate || {};
     var headline = score >= 85 ? "Clean room ready" : score >= 60 ? "Needs attention" : "Build risk detected";
-    var copy =
-      score >= 85
-        ? "The target has strong deterministic evidence and can be promoted with confidence."
-        : "Review the highlighted landmines and rerun auto-heal before promoting this target.";
-     var beforeScore = report.before_certificate
-       ? numberOr(report.before_certificate.linux_readiness_score, score)
-       : score;
-     panel.innerHTML =
-       '<div class="score-layout">' +
-       icons.renderRadialGauge(beforeScore, score, "Readiness", { size: 132 }) +
-      '<div class="score-copy"><div class="eyebrow">Current signal</div><strong>' +
-      escapeHtml(headline) +
-      '</strong><p>' +
-      escapeHtml(copy) +
-      '</p><div class="metric-stack" style="margin-top:13px"><div class="metric-line"><span>Dependency lock</span><strong>' +
-      escapeHtml(numberOr(certificate.dependency_lock_score, 0).toFixed(0) + "%") +
-      '</strong></div><div class="metric-line"><span>Clean room</span><strong>' +
-      (certificate.is_cleanroom_certified ? "verified" : "pending") +
-      "</strong></div></div></div></div>";
-    setText("readiness-headline", headline);
-    setText("readiness-copy", copy);
+    var copy = score >= 85 ? "The target has strong deterministic evidence and can be promoted with confidence." : "Review the highlighted landmines and rerun auto-heal before promoting this target.";
+    panel.innerHTML = '<div class="readiness-mini"><div class="readiness-ring" style="border-color:' + (score >= 85 ? "var(--teal)" : "var(--amber)") + '"><strong>' + Math.round(score) + '</strong><span>%</span></div><div><strong>' + escapeHtml(headline) + '</strong><p>' + escapeHtml(copy) + '</p></div></div>';
   }
 
   function renderTelemetry() {
@@ -260,14 +239,24 @@
     var score = readinessScore(report);
     var certificate = report && report.certificate ? report.certificate : {};
     var issues = report ? safeArray(report.issues) : [];
+    var openIssues = issues.filter(function (issue) { return !issueIsFixed(issue); }).length;
+    var auditLabel = state.busy ? "RUNNING" : report ? "COMPLETE" : "IDLE";
     setText("readiness-score", score == null ? "--" : Math.round(score) + "%");
     setText("readiness-meta", score == null ? "Waiting for first audit" : score >= 85 ? "Clean room ready" : "Needs attention");
-    setText("open-issues", report ? issues.length : "--");
-    setText("issues-meta", report ? (issues.length ? "Review findings below" : "No open landmines") : "No findings loaded");
-    setText("root-hash", certificate.root_hash ? truncate(certificate.root_hash, 7, 4) : "pending");
+    setText("open-issues", report ? openIssues : "--");
+    setText("issues-meta", report ? openIssues + " open / " + (issues.length - openIssues) + " healed" : "No findings loaded");
+    setText("root-hash", certificate.root_hash ? truncate(certificate.root_hash, 7, 4) : "PENDING");
     setText("root-meta", certificate.root_hash ? "Deterministic certificate root" : "Certificate not generated");
-    setText("audit-state", state.busy ? "Running" : report ? "Complete" : "Idle");
-    setText("audit-meta", report ? new Date(report.scanned_at || Date.now()).toLocaleString() : "Select scan to begin");
+    setText("audit-state", auditLabel);
+    setText("audit-meta", report ? new Date(report.scanned_at || Date.now()).toLocaleString() : "Awaiting first audit");
+    setText("audit-state-card", auditLabel);
+    setText("audit-meta-card", report ? "Last run " + new Date(report.scanned_at || Date.now()).toLocaleTimeString() : "Select scan to begin");
+    var readinessMeter = byId("readiness-meter");
+    if (readinessMeter) readinessMeter.style.width = (score == null ? 0 : Math.max(0, Math.min(100, score))) + "%";
+    var issuesMeter = byId("issues-meter");
+    if (issuesMeter) issuesMeter.style.width = (issues.length ? Math.min(100, openIssues * 12) : 0) + "%";
+    var auditMeter = byId("audit-meter");
+    if (auditMeter) auditMeter.style.width = state.busy ? "55%" : report ? "100%" : "0%";
   }
 
   function renderAnalysis() {
@@ -275,79 +264,49 @@
     if (!panel) return;
     var analysis = state.analysis;
     if (!analysis && state.report) {
-      analysis = {
-        diagnostics: safeArray(state.report.compiler_diagnostics || state.report.diagnostics),
-        apt_packages: [],
-        apt_install_command: "",
-        root_cause_summary: "Audit diagnostics loaded from the target.",
-      };
+      analysis = { diagnostics: safeArray(state.report.compiler_diagnostics || state.report.diagnostics), apt_packages: [], apt_install_command: "", root_cause_summary: "Audit diagnostics loaded from the target." };
     }
     if (!analysis) return;
     var packages = safeArray(analysis.apt_packages || analysis.recommended_apt_packages);
     var command = analysis.apt_install_command || "No apt package additions recommended.";
-    panel.innerHTML =
-      '<div class="analysis-banner">' +
-      icon("cpuCompiler", 16) +
-      "<span>" +
-      escapeHtml(analysis.root_cause_summary || "No root cause summary returned by the parser.") +
-      "</span></div>" +
-      '<div class="eyebrow">Recommended packages</div><div class="package-cloud">' +
-      (packages.length
-        ? packages
-            .map(function (item) {
-              return '<span class="package-chip">' + escapeHtml(item) + "</span>";
-            })
-            .join("")
-        : '<span class="muted-text">No package additions recommended.</span>') +
-      '</div><div class="eyebrow">Install command</div><div class="command-block"><code>' +
-      escapeHtml(command) +
-      '</code><button class="icon-button" type="button" data-copy="' +
-      escapeHtml(command) +
-      '" aria-label="Copy install command">' +
-      icon("copyClipboard", 15) +
-      "</button></div>";
+    panel.innerHTML = '<div class="analysis-banner">' + icon("cpuCompiler", 15) + '<span>' + escapeHtml(analysis.root_cause_summary || "No root cause summary returned by the parser.") + '</span></div><div class="eyebrow">RECOMMENDED PACKAGES</div><div class="package-cloud">' + (packages.length ? packages.map(function (item) { return '<span class="package-chip">' + escapeHtml(item) + '</span>'; }).join("") : '<span class="muted-text">No package additions recommended.</span>') + '</div><div class="eyebrow">INSTALL COMMAND</div><div class="command-block"><code>' + escapeHtml(command) + '</code><button class="icon-button" type="button" data-copy="' + escapeHtml(command) + '" aria-label="Copy install command">' + icon("copyClipboard", 14) + '</button></div>';
+    hydrateIcons();
+  }
+
+  function diffText(text) {
+    return String(text || "").split("\n").map(function (line) {
+      var safe = escapeHtml(line);
+      if (line.indexOf("+") === 0 && line.indexOf("+++") !== 0) return '<span class="diff-add">' + safe + '</span>';
+      if (line.indexOf("-") === 0 && line.indexOf("---") !== 0) return '<span class="diff-remove">' + safe + '</span>';
+      return safe;
+    }).join("\n");
   }
 
   function renderDockerfile() {
     var panel = byId("dockerfile-panel");
     var badge = byId("dockerfile-badge");
     var report = state.report;
-    var patch = report && (report.dockerfile_patch || safeArray(report.dockerfile_patches)[0]);
     if (!panel || !badge) return;
-    if (!patch) {
-      badge.className = "badge";
-      badge.textContent = report ? "No patch" : "Not checked";
-      panel.innerHTML =
-        '<div class="empty-state"><span class="icon-slot" data-icon="fileCode" data-size="24"></span><strong>' +
-        (report ? "No Dockerfile patch required" : "Dockerfile evidence pending") +
-        "</strong><span>" +
-        (report ? "The audit did not return a Dockerfile repair proposal." : "Run a scan to inspect deterministic base images and package layers.") +
-        "</span></div>";
+    var patch = report && (report.dockerfile_patch || safeArray(report.dockerfile_patches)[0]);
+    var reportDiffs = report ? safeArray(report.unified_diffs) : [];
+    var patchDiff = patch && (patch.unified_diff || patch.diff) ? [patch.unified_diff || patch.diff] : [];
+    var allDiffs = patchDiff.concat(reportDiffs).filter(function (diff, index, collection) { return diff && collection.indexOf(diff) === index; });
+    var dockerDiffs = allDiffs.filter(function (diff) { return /dockerfile/i.test(diff); });
+    var displayDiffs = dockerDiffs.length ? dockerDiffs : allDiffs;
+    if (!displayDiffs.length) {
+      badge.textContent = report ? "NO PATCH" : "NOT CHECKED";
+      badge.className = "table-count";
+      panel.innerHTML = '<div class="empty-state"><span class="icon-slot" data-icon="fileCode" data-size="25"></span><strong>' + (report ? "No Dockerfile diff returned" : "Dockerfile evidence pending") + '</strong><span>' + (report ? "The audit did not return a Dockerfile repair proposal." : "Run auto-heal to inspect deterministic base images and package layers.") + '</span></div>';
       hydrateIcons();
       return;
     }
-    var applied = Boolean(patch.applied);
-    badge.className = "badge " + (applied ? "badge-success" : "badge-warning");
-    badge.textContent = applied ? "Applied in stage" : "Proposal ready";
-    var changes = safeArray(patch.changes);
-    var diff = patch.unified_diff || patch.diff || "";
-    panel.innerHTML =
-      '<div class="analysis-banner">' +
-      icon(applied ? "checkSuccess" : "dockerContainer", 16) +
-      "<span>" +
-      escapeHtml(patch.confidence != null ? "Repair confidence " + Math.round(Number(patch.confidence) * 100) + "%." : "Deterministic Dockerfile repair evidence returned.") +
-      "</span></div>" +
-      '<div class="eyebrow">Proposed changes</div><div class="issue-list" style="margin-top:9px">' +
-      (changes.length
-        ? changes
-            .slice(0, 5)
-            .map(function (change) {
-              return '<div class="issue-row"><div class="issue-title">' + escapeHtml(change) + "</div></div>";
-            })
-            .join("")
-        : '<div class="issue-row"><div class="issue-title">No textual changes reported</div></div>') +
-      "</div>" +
-      (diff ? '<pre class="diff-code">' + renderDiffText(diff) + "</pre>" : "");
+    var applied = Boolean(patch && patch.applied);
+    badge.className = "table-count";
+    badge.textContent = applied ? "APPLIED" : "PATCH READY";
+    var confidence = patch && patch.confidence != null ? "Repair confidence " + Math.round(Number(patch.confidence) * 100) + "%." : "Unified diff evidence from the isolated healing stage.";
+    var changes = patch ? safeArray(patch.changes) : [];
+    var comparisonBanner = state.comparison ? '<div class="analysis-banner">' + icon(state.comparison.merkle_match ? "checkSuccess" : "gitDiff", 15) + '<span>' + (state.comparison.merkle_match ? "Healed certificate matches the baseline root." : "Certificate drift detected after healing.") + '</span></div>' : '';
+    panel.innerHTML = comparisonBanner + '<div class="analysis-banner">' + icon(applied ? "checkSuccess" : "gitDiff", 15) + '<span>' + escapeHtml(confidence) + '</span></div>' + (changes.length ? '<div class="diff-list">' + changes.slice(0, 4).map(function (change) { return '<div class="diff-item"><div class="diff-topline"><span class="diff-title">' + escapeHtml(change) + '</span><span class="pill">changed</span></div></div>'; }).join("") + '</div>' : '') + '<div class="diff-list" style="margin-top:8px">' + displayDiffs.slice(0, 3).map(function (diff) { return '<pre class="diff-code">' + diffText(diff) + '</pre>'; }).join("") + '</div>';
   }
 
   function renderCertificate() {
@@ -358,103 +317,38 @@
     var metrics = byId("certificate-metrics");
     if (!tree || !seal || !metrics) return;
     if (!certificate) {
-      tree.innerHTML = '<div class="empty-state"><span class="icon-slot" data-icon="merkleTree" data-size="24"></span><strong>Merkle root pending</strong><span>Generate or load an audit certificate to render the evidence tree.</span></div>';
-      seal.innerHTML = '<div class="empty-state"><span class="icon-slot" data-icon="shieldAlert" data-size="24"></span><strong>Certificate pending</strong><span>Run an audit to see verification state and root hash.</span></div>';
+      tree.innerHTML = "Merkle root pending";
+      seal.innerHTML = '<div class="empty-state compact-empty"><span class="icon-slot" data-icon="shieldAlert" data-size="22"></span><strong>Certificate pending</strong><span>Generate a deterministic Merkle proof after the audit.</span></div>';
+      metrics.innerHTML = '<div class="metric-line"><span>Runtime</span><strong>--</strong></div><div class="metric-line"><span>Lock score</span><strong>--</strong></div><div class="metric-line"><span>Linux readiness</span><strong>--</strong></div>';
       hydrateIcons();
       return;
     }
-     tree.innerHTML = icons.renderMerkleTreeSVG(certificate, state.comparison || { rootHash: certificate.root_hash });
+    tree.innerHTML = icons.renderMerkleTreeSVG(certificate, state.comparison || { rootHash: certificate.root_hash });
     seal.innerHTML = icons.renderCertificationSeal(certificate);
-    metrics.innerHTML =
-      '<div class="metric-line"><span>Runtime</span><strong>' +
-      escapeHtml(certificate.runtime || "unknown") +
-      '</strong></div><div class="metric-line"><span>Lock score</span><strong>' +
-      escapeHtml(numberOr(certificate.dependency_lock_score, 0).toFixed(0) + "%") +
-      '</strong></div><div class="metric-line"><span>Linux readiness</span><strong>' +
-      escapeHtml(numberOr(certificate.linux_readiness_score, 0).toFixed(0) + "%") +
-      "</strong></div>";
+    metrics.innerHTML = '<div class="metric-line"><span>Runtime</span><strong>' + escapeHtml(certificate.runtime || "unknown") + '</strong></div><div class="metric-line"><span>Lock score</span><strong>' + escapeHtml(numberOr(certificate.dependency_lock_score, 0).toFixed(0) + "%") + '</strong></div><div class="metric-line"><span>Linux readiness</span><strong>' + escapeHtml(numberOr(certificate.linux_readiness_score, 0).toFixed(0) + "%") + '</strong></div>';
   }
 
-  function renderDiffText(text) {
-    return String(text || "")
-      .split("\n")
-      .map(function (line) {
-        var safe = escapeHtml(line);
-        if (line.indexOf("+") === 0 && line.indexOf("+++") !== 0) return '<span class="diff-add">' + safe + "</span>";
-        if (line.indexOf("-") === 0 && line.indexOf("---") !== 0) return '<span class="diff-remove">' + safe + "</span>";
-        return safe;
-      })
-      .join("\n");
-  }
-
-  function renderDiff() {
-    var panel = byId("diff-panel");
-    if (!panel) return;
-    var report = state.report;
+  function renderComparison() {
+    var panel = byId("comparison-panel");
+    if (!panel || !state.comparison) return;
     var comparison = state.comparison;
-    var diffs = report ? safeArray(report.unified_diffs) : [];
-    var files = comparison
-      ? [].concat(
-          safeArray(comparison.modified_files),
-          safeArray(comparison.added_files),
-          safeArray(comparison.removed_files),
-          safeArray(comparison.line_ending_drifts)
-        )
-      : [];
-    if (!diffs.length && !files.length) return;
-    panel.innerHTML =
-      (comparison
-        ? '<div class="analysis-banner">' +
-          icon(comparison.merkle_match ? "checkSuccess" : "gitDiff", 16) +
-          "<span>" +
-          (comparison.merkle_match
-            ? "The healed certificate matches the baseline root."
-            : "Certificate drift detected. Review modified paths before promotion.") +
-          (comparison.score_delta != null ? " Score delta: " + escapeHtml(comparison.score_delta) + "." : "") +
-          "</span></div>"
-        : "") +
-      '<div class="diff-list">' +
-      files
-        .slice(0, 12)
-        .map(function (path) {
-          return '<div class="diff-item"><div class="diff-topline"><span class="diff-title">' + escapeHtml(path) + '</span><span class="pill pill-warning">changed</span></div></div>';
-        })
-        .join("") +
-      diffs
-        .slice(0, 5)
-        .map(function (diff) {
-          return '<pre class="diff-code">' + renderDiffText(diff) + "</pre>";
-        })
-        .join("") +
-      "</div>";
+    panel.innerHTML = '<div class="analysis-banner">' + icon(comparison.merkle_match ? "checkSuccess" : "gitDiff", 15) + '<span>' + (comparison.merkle_match ? "The healed certificate matches the baseline root." : "Certificate drift detected. Review modified paths before promotion.") + (comparison.score_delta != null ? " Score delta: " + escapeHtml(comparison.score_delta) + "." : "") + '</span></div>';
+    hydrateIcons();
   }
 
   function renderDiagnostics() {
     var panel = byId("diagnostic-panel");
     if (!panel) return;
-    var diagnostics = state.analysis
-      ? safeArray(state.analysis.diagnostics)
-      : state.report
-        ? safeArray(state.report.compiler_diagnostics || state.report.diagnostics)
-        : [];
-    if (!diagnostics.length) return;
-    panel.innerHTML = '<div class="diagnostic-list">' +
-      diagnostics
-        .slice(0, 10)
-        .map(function (diagnostic) {
-          var severity = severityClass(diagnostic.severity);
-          var location = diagnostic.file_path
-            ? diagnostic.file_path + (diagnostic.line_number ? ":" + diagnostic.line_number : "")
-            : "build output";
-          return '<article class="diagnostic-row"><div class="diagnostic-topline"><div class="diagnostic-title">' +
-            escapeHtml(diagnostic.message || diagnostic.error_signature || "Compiler diagnostic") +
-            '</div><span class="severity severity-' + severity + '">' + escapeHtml(severity) +
-            '</span></div><p class="diagnostic-message">' + escapeHtml(diagnostic.root_cause_explanation || diagnostic.tool || "normalized compiler output") +
-            '</p><div class="diagnostic-meta"><code>' + escapeHtml(location) + "</code>" +
-            (diagnostic.code ? '<span>' + escapeHtml(diagnostic.code) + '</span>' : "") +
-            '</div></article>';
-        })
-        .join("") + "</div>";
+    var diagnostics = state.analysis ? safeArray(state.analysis.diagnostics) : state.report ? safeArray(state.report.compiler_diagnostics || state.report.diagnostics) : [];
+    if (!diagnostics.length) {
+      panel.innerHTML = "";
+      return;
+    }
+    panel.innerHTML = '<div class="diagnostic-list">' + diagnostics.slice(0, 8).map(function (diagnostic) {
+      var severity = severityClass(diagnostic.severity);
+      var location = diagnostic.file_path ? diagnostic.file_path + (diagnostic.line_number ? ":" + diagnostic.line_number : "") : "build output";
+      return '<article class="diagnostic-row"><div class="diagnostic-topline"><div class="diagnostic-title">' + escapeHtml(diagnostic.message || diagnostic.error_signature || "Compiler diagnostic") + '</div><span class="severity severity-' + severity + '">' + escapeHtml(severity) + '</span></div><p class="diagnostic-message">' + escapeHtml(diagnostic.root_cause_explanation || diagnostic.tool || "normalized compiler output") + '</p><div class="diagnostic-meta">' + escapeHtml(location) + (diagnostic.code ? " / " + escapeHtml(diagnostic.code) : "") + '</div></article>';
+    }).join("") + '</div>';
   }
 
   function renderAll() {
@@ -464,25 +358,21 @@
     renderAnalysis();
     renderDockerfile();
     renderCertificate();
-    renderDiff();
+    renderComparison();
     renderDiagnostics();
     hydrateIcons();
   }
 
-  function selectTab(name) {
+  function selectTab(name, shouldScroll) {
     var tabName = name || "landmines";
-    state.activeTab = tabName;
-    document.querySelectorAll("[data-tab]").forEach(function (button) {
-      var selected = button.getAttribute("data-tab") === tabName;
-      button.classList.toggle("is-active", selected);
-      button.setAttribute("aria-selected", selected ? "true" : "false");
-    });
+    var targetMap = { landmines: "bugs-panel", apt: "docker-panel", sandbox: "analysis-tool", certificate: "certificate-tool", logs: "logs" };
     document.querySelectorAll("[data-tab-target]").forEach(function (button) {
       button.classList.toggle("is-active", button.getAttribute("data-tab-target") === tabName);
     });
-    document.querySelectorAll("[data-panel]").forEach(function (panel) {
-      panel.classList.toggle("is-active", panel.getAttribute("data-panel") === tabName);
-    });
+    if (shouldScroll !== false) {
+      var target = byId(targetMap[tabName] || tabName);
+      if (target) target.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
   }
 
   function setDrawer(open) {
@@ -512,11 +402,11 @@
           select.appendChild(option);
         });
       }
-      setConnection("API online", "success");
+      setConnection("ENGINE ONLINE", "success");
       renderTargetDescription();
       logEvent("loaded " + state.targets.length + " target(s)", "success");
     } catch (error) {
-      setConnection("API unavailable", "warning");
+      setConnection("API UNAVAILABLE", "warning");
       logEvent("target discovery unavailable: " + error.message, "warning");
       showToast("Target discovery is unavailable. The default target remains selected.", false);
     }
@@ -525,26 +415,27 @@
   async function runAudit(autoHeal, quiet) {
     if (state.busy) return;
     state.busy = true;
+    state.auditWasAutoHealed = Boolean(autoHeal);
     setBusy("scan-button", true);
     setBusy("heal-button", true);
-    setConnection(autoHeal ? "Healing target" : "Auditing target", "warning");
-    setText("audit-state", autoHeal ? "Healing" : "Running");
+    setConnection(autoHeal ? "HEALING TARGET" : "AUDITING TARGET", "warning");
+    setText("audit-state", autoHeal ? "HEALING" : "RUNNING");
+    setText("audit-state-card", autoHeal ? "HEALING" : "RUNNING");
+    renderTelemetry();
     logEvent((autoHeal ? "auto-heal" : "audit") + " started for " + state.target, "info");
     try {
-      var report = await request("/api/v1/audit", {
-        method: "POST",
-        body: { target: state.target, auto_heal: Boolean(autoHeal) },
-      });
+      var report = await request("/api/v1/audit", { method: "POST", body: { target: state.target, auto_heal: Boolean(autoHeal) } });
       state.report = report || null;
       state.analysis = null;
       state.comparison = null;
-      setConnection("API online", "success");
+      setConnection("ENGINE ONLINE", "success");
       logEvent((autoHeal ? "auto-heal" : "audit") + " complete", "success");
       renderAll();
       if (!quiet) showToast(autoHeal ? "Auto-heal evidence is ready." : "Target audit is ready.", false);
     } catch (error) {
-      setConnection("Audit failed", "error");
-      setText("audit-state", "Unavailable");
+      setConnection("AUDIT FAILED", "error");
+      setText("audit-state", "UNAVAILABLE");
+      setText("audit-state-card", "ERROR");
       logEvent("audit failed: " + error.message, "error");
       if (!quiet) showToast("Audit failed: " + error.message, true);
     } finally {
@@ -560,15 +451,12 @@
     setBusy("parse-log-button", true);
     logEvent("parsing build log for " + state.target, "info");
     try {
-      state.analysis = await request("/api/v1/parse-log", {
-        method: "POST",
-        body: { target: state.target },
-      });
-      setConnection("API online", "success");
+      state.analysis = await request("/api/v1/parse-log", { method: "POST", body: { target: state.target } });
+      setConnection("ENGINE ONLINE", "success");
       logEvent("compiler telemetry received", "success");
       renderAnalysis();
       renderDiagnostics();
-      selectTab("apt");
+      selectTab("sandbox", false);
       showToast("Compiler telemetry parsed.", false);
     } catch (error) {
       logEvent("parse failed: " + error.message, "error");
@@ -588,10 +476,7 @@
     setBusy("run-sandbox-button", true);
     logEvent("parsing custom compiler trace", "info");
     try {
-      state.analysis = await request("/api/v1/parse-log", {
-        method: "POST",
-        body: { log_text: text },
-      });
+      state.analysis = await request("/api/v1/parse-log", { method: "POST", body: { log_text: text } });
       renderAnalysis();
       renderDiagnostics();
       logEvent("custom compiler trace normalized", "success");
@@ -624,17 +509,14 @@
     setBusy("certify-button", true);
     logEvent("generating certificate for " + state.target, "info");
     try {
-      var certificate = await request("/api/v1/certify", {
-        method: "POST",
-        body: { target: state.target },
-      });
+      var certificate = await request("/api/v1/certify", { method: "POST", body: { target: state.target } });
       if (!state.report) state.report = { target: state.target, issues: [] };
       state.report.certificate = certificate;
       state.report.merkle_root = certificate.root_hash;
-      setConnection("API online", "success");
+      setConnection("ENGINE ONLINE", "success");
       logEvent("certificate generated", "success");
       renderAll();
-      selectTab("certificate");
+      selectTab("certificate", false);
       showToast("Certificate evidence is ready.", false);
     } catch (error) {
       logEvent("certificate failed: " + error.message, "error");
@@ -649,13 +531,11 @@
     setBusy("compare-button", true);
     logEvent("comparing baseline and healed certificates", "info");
     try {
-      state.comparison = await request("/api/v1/compare", {
-        method: "POST",
-        body: { target: state.target, auto_heal: true },
-      });
+      state.comparison = await request("/api/v1/compare", { method: "POST", body: { target: state.target, auto_heal: true } });
       logEvent("comparison evidence received", "success");
-      renderDiff();
-      selectTab("sandbox");
+      renderDockerfile();
+      renderComparison();
+      selectTab("apt", false);
       showToast("Certificate comparison is ready.", false);
     } catch (error) {
       logEvent("comparison failed: " + error.message, "error");
@@ -668,63 +548,55 @@
   async function copyText(value) {
     try {
       await navigator.clipboard.writeText(value);
-      showToast("Command copied to clipboard.", false);
+      showToast("Copied to clipboard.", false);
     } catch (error) {
       showToast("Clipboard access is unavailable.", true);
     }
   }
 
   function bindEvents() {
-    byId("scan-button").addEventListener("click", function () {
-      runAudit(false, false);
-    });
-    byId("heal-button").addEventListener("click", function () {
-      runAudit(true, false);
-    });
-    byId("parse-log-button").addEventListener("click", parseLog);
-    byId("run-sandbox-button").addEventListener("click", parseCustomLog);
-    byId("certify-button").addEventListener("click", certify);
-    byId("copy-certificate-button").addEventListener("click", function () {
+    on("scan-button", "click", function () { runAudit(false, false); });
+    on("heal-button", "click", function () { runAudit(true, false); });
+    on("parse-log-button", "click", parseLog);
+    on("run-sandbox-button", "click", parseCustomLog);
+    on("certify-button", "click", certify);
+    on("copy-certificate-button", "click", function () {
       var certificate = state.report && state.report.certificate;
-      if (certificate) copyText(JSON.stringify(certificate, null, 2));
-      else showToast("Generate a certificate first.", true);
+      if (certificate) copyText(JSON.stringify(certificate, null, 2)); else showToast("Generate a certificate first.", true);
     });
-    byId("download-certificate-button").addEventListener("click", downloadCertificate);
-    byId("compare-button").addEventListener("click", compare);
-    byId("target-select").addEventListener("change", function (event) {
+    on("download-certificate-button", "click", downloadCertificate);
+    on("compare-button", "click", compare);
+    on("target-select", "change", function (event) {
       state.target = event.target.value || "nightmare_ml_service";
       state.report = null;
       state.analysis = null;
       state.comparison = null;
+      state.auditWasAutoHealed = false;
+      renderTargetDescription();
       renderAll();
       logEvent("target changed to " + state.target, "info");
       runAudit(false, false);
     });
-    byId("compiler-jump").addEventListener("click", function () {
-      selectTab("sandbox");
-      byId("compiler-log-editor").focus();
+    document.querySelectorAll("[data-refresh-audit]").forEach(function (button) {
+      button.addEventListener("click", function () { runAudit(false, false); });
     });
     document.querySelectorAll("[data-log-preset]").forEach(function (button) {
       button.addEventListener("click", function () {
         var editor = byId("compiler-log-editor");
         if (editor) editor.value = logPresets[button.getAttribute("data-log-preset")] || "";
-        selectTab("sandbox");
+        selectTab("sandbox", false);
       });
     });
-    document.querySelectorAll("[data-tab], [data-tab-target]").forEach(function (button) {
-      button.addEventListener("click", function () {
-        selectTab(button.getAttribute("data-tab") || button.getAttribute("data-tab-target"));
-      });
+    document.querySelectorAll("[data-tab-target]").forEach(function (button) {
+      button.addEventListener("click", function () { selectTab(button.getAttribute("data-tab-target"), true); });
     });
-    byId("terminal-toggle").addEventListener("click", function () {
+    on("terminal-toggle", "click", function () {
       setDrawer(true);
+      selectTab("logs", true);
     });
-    byId("drawer-toggle").addEventListener("click", function () {
+    on("drawer-toggle", "click", function () {
       var drawer = byId("terminal-drawer");
-      setDrawer(!drawer.classList.contains("is-open"));
-    });
-    byId("drawer-close").addEventListener("click", function () {
-      setDrawer(false);
+      setDrawer(!drawer || !drawer.classList.contains("is-open"));
     });
     document.addEventListener("click", function (event) {
       var copyButton = event.target.closest ? event.target.closest("[data-copy]") : null;
@@ -751,9 +623,5 @@
     selectTab: selectTab,
   };
 
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", bootstrap);
-  } else {
-    bootstrap();
-  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", bootstrap); else bootstrap();
 })();

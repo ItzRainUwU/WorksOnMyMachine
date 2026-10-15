@@ -3,304 +3,172 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="theme-color" content="#080a10">
-    <meta name="description" content="WorksOnMyMachine reproducibility control plane">
-    <title>Clean Room | WorksOnMyMachine</title>
+    <meta name="theme-color" content="#05080b">
+    <meta name="description" content="WorksOnMyMachine cross-OS reproducibility control plane">
+    <title>WorksOnMyMachine | Control Plane</title>
     <link rel="stylesheet" href="/static/styles.css">
   </head>
   <body>
     <div class="app-shell">
-      <header class="topbar">
-        <div class="brand-lockup">
-          <div class="brand-mark" aria-hidden="true">
-            <span class="icon-slot" data-icon="logoCleanRoom" data-size="22"></span>
-          </div>
-          <div>
-            <div class="brand-name">WorksOnMyMachine</div>
-            <div class="brand-product">Clean Room control plane <span class="version-pill">v1.0 / Python 3.11.9</span></div>
-          </div>
+      <aside class="sidebar" aria-label="Control plane navigation">
+        <div class="sidebar-brand">
+          <span class="brand-mark" aria-hidden="true"><span class="icon-slot" data-icon="logoCleanRoom" data-size="22"></span></span>
+          <span class="brand-copy"><strong>WORKS<span>ON</span>MYMACHINE</strong><small>REPRODUCIBILITY OS</small></span>
         </div>
-        <nav class="topbar-nav" aria-label="Primary navigation">
-          <a href="#overview" aria-current="page">Overview</a>
-          <a href="#evidence">Evidence</a>
-          <a href="#telemetry">Telemetry</a>
-        </nav>
-          <div class="topbar-right">
-          <div class="status-inline" id="connection-status">
-            <span class="status-dot" id="connection-dot"></span>
-            <span id="connection-label">Engine Online / Offline-First Mode</span>
-          </div>
-            <button class="button" id="terminal-toggle" type="button">
-            <span class="icon-slot" data-icon="terminalPrompt" data-size="16"></span>
-              Terminal
-            </button>
-            <a class="button" href="/docs" target="_blank" rel="noreferrer">API docs</a>
-        </div>
-      </header>
 
-      <div class="workspace-grid">
-        <aside class="sidebar" aria-label="Target navigation">
-          <div class="target-control">
-            <label class="side-label" for="target-select">Active target</label>
+        <div class="sidebar-section">
+          <div class="sidebar-label">Workspace</div>
+          <div class="workspace-chip"><span class="status-dot"></span><span>LOCAL ENGINE</span><code>v1.0</code></div>
+        </div>
+
+        <nav class="side-nav" aria-label="Dashboard sections">
+          <button class="is-active" type="button" data-tab-target="landmines"><span class="nav-index">01</span><span class="icon-slot" data-icon="radarScan" data-size="16"></span><span>Cross-OS Bugs</span></button>
+          <button type="button" data-tab-target="apt"><span class="nav-index">02</span><span class="icon-slot" data-icon="dockerContainer" data-size="16"></span><span>Git Diff / Dockerfile</span></button>
+          <button type="button" data-tab-target="sandbox"><span class="nav-index">03</span><span class="icon-slot" data-icon="cpuCompiler" data-size="16"></span><span>Compiler Sandbox</span></button>
+          <button type="button" data-tab-target="certificate"><span class="nav-index">04</span><span class="icon-slot" data-icon="merkleTree" data-size="16"></span><span>Certificate</span></button>
+          <button type="button" data-tab-target="logs"><span class="nav-index">05</span><span class="icon-slot" data-icon="terminalPrompt" data-size="16"></span><span>Execution Logs</span></button>
+        </nav>
+
+        <div class="sidebar-footer">
+          <div class="sidebar-label">System posture</div>
+          <div class="posture-line"><span class="status-dot"></span><strong>OFFLINE-FIRST</strong></div>
+          <p>Evidence is generated locally. Repairs run in a copy-on-write staging area.</p>
+          <div class="sidebar-footer-meta"><span>PYTHON 3.11.9</span><span>API READY</span></div>
+        </div>
+      </aside>
+
+      <div class="app-main">
+        <header class="topbar">
+          <div class="topbar-context">
+            <span class="topbar-mini-mark" aria-hidden="true"><span class="icon-slot" data-icon="logoCleanRoom" data-size="17"></span></span>
+            <strong class="topbar-brand-name">WORKS<span>ON</span>MYMACHINE</strong>
+            <span class="topbar-divider"></span>
+            <span class="topbar-kicker">CONTROL PLANE</span>
+            <span class="topbar-route">AUDIT / TARGET</span>
+          </div>
+          <div class="project-picker">
+            <label for="target-select">PROJECT</label>
             <div class="select-wrap">
-              <select class="target-select" id="target-select" aria-label="Active target">
+              <select id="target-select" class="target-select" aria-label="Active project target">
                 <option value="nightmare_ml_service">nightmare_ml_service</option>
               </select>
-              <span class="icon-slot" data-icon="chevronRight" data-size="15"></span>
+              <span class="icon-slot" data-icon="chevronRight" data-size="14"></span>
             </div>
-            <p class="target-description" id="target-description">Windows path, CRLF, and native wheel failure fixture.</p>
           </div>
-
-          <nav class="side-nav" aria-label="Evidence sections">
-            <button class="is-active" type="button" data-tab-target="landmines">
-              <span class="icon-slot" data-icon="radarScan" data-size="17"></span>
-              <span>Landmines</span>
-            </button>
-            <button type="button" data-tab-target="apt">
-              <span class="icon-slot" data-icon="dockerContainer" data-size="17"></span>
-              <span>APT and Dockerfile</span>
-            </button>
-            <button type="button" data-tab-target="certificate">
-              <span class="icon-slot" data-icon="merkleTree" data-size="17"></span>
-              <span>Certificate</span>
-            </button>
-            <button type="button" data-tab-target="sandbox">
-              <span class="icon-slot" data-icon="gitDiff" data-size="17"></span>
-              <span>Diff sandbox</span>
-            </button>
-          </nav>
-
-          <div class="side-foot">
-            <div class="eyebrow">Deterministic by default</div>
-            <p>Evidence stays local. Every audit can be replayed from the target and its lockfiles.</p>
+          <div class="topbar-actions">
+            <div class="status-inline" id="connection-status"><span class="status-dot" id="connection-dot"></span><span id="connection-label">ENGINE ONLINE</span></div>
+            <button class="button button-quiet" id="terminal-toggle" type="button"><span class="icon-slot" data-icon="terminalPrompt" data-size="15"></span>TERMINAL</button>
+            <a class="button button-quiet api-link" href="/docs" target="_blank" rel="noreferrer">API DOCS</a>
+            <button class="button button-scan" id="scan-button" type="button"><span class="icon-slot" data-icon="radarScan" data-size="15"></span>SCAN</button>
+            <button class="button button-heal" id="heal-button" type="button"><span class="icon-slot" data-icon="autoHealBolt" data-size="15"></span>AUTO-HEAL</button>
           </div>
-        </aside>
+        </header>
 
-        <main class="main-column" id="overview">
-          <div class="content-width">
-            <section class="hero" aria-labelledby="hero-title">
-              <div>
-                <div class="eyebrow">Reproducibility control plane</div>
-                <h1 id="hero-title">Clean room confidence for every build.</h1>
-                <p>Scan hidden environment assumptions, heal deterministic build inputs, and leave an auditable certificate.</p>
-              </div>
-              <div class="hero-actions">
-                <button class="button button-primary" id="scan-button" type="button">
-                  <span class="icon-slot" data-icon="radarScan" data-size="16"></span>
-                  Scan target
-                </button>
-                <button class="button button-heal" id="heal-button" type="button">
-                  <span class="icon-slot" data-icon="autoHealBolt" data-size="16"></span>
-                  Auto-heal and recheck
-                </button>
-                <button class="button" id="compiler-jump" type="button">
-                  <span class="icon-slot" data-icon="cpuCompiler" data-size="16"></span>
-                  Compiler sandbox
-                </button>
-              </div>
-            </section>
-
-            <section class="telemetry-grid" id="telemetry" aria-label="Audit telemetry">
-              <article class="telemetry-card">
-                <div class="card-heading">
-                  <span class="eyebrow">Readiness score</span>
-                  <span class="icon-slot" data-icon="shieldVerified" data-size="17"></span>
-                </div>
-                <strong class="telemetry-value" id="readiness-score">--</strong>
-                <span class="telemetry-meta" id="readiness-meta">Waiting for first audit</span>
-              </article>
-              <article class="telemetry-card">
-                <div class="card-heading">
-                  <span class="eyebrow">Open landmines</span>
-                  <span class="icon-slot" data-icon="shieldAlert" data-size="17"></span>
-                </div>
-                <strong class="telemetry-value" id="open-issues">--</strong>
-                <span class="telemetry-meta" id="issues-meta">No findings loaded</span>
-              </article>
-              <article class="telemetry-card">
-                <div class="card-heading">
-                  <span class="eyebrow">Merkle root</span>
-                  <span class="icon-slot" data-icon="merkleTree" data-size="17"></span>
-                </div>
-                <strong class="telemetry-value mono" id="root-hash">pending</strong>
-                <span class="telemetry-meta" id="root-meta">Certificate not generated</span>
-              </article>
-              <article class="telemetry-card">
-                <div class="card-heading">
-                  <span class="eyebrow">Audit state</span>
-                  <span class="icon-slot" data-icon="radarScan" data-size="17"></span>
-                </div>
-                <strong class="telemetry-value" id="audit-state">Idle</strong>
-                <span class="telemetry-meta" id="audit-meta">Select scan to begin</span>
-              </article>
-            </section>
-
-            <div class="tabs" id="evidence" role="tablist" aria-label="Audit evidence">
-              <button class="tab-button is-active" type="button" role="tab" aria-selected="true" data-tab="landmines">
-                <span class="icon-slot" data-icon="radarScan" data-size="16"></span>
-                Landmines
-              </button>
-              <button class="tab-button" type="button" role="tab" aria-selected="false" data-tab="apt">
-                <span class="icon-slot" data-icon="dockerContainer" data-size="16"></span>
-                APT and Dockerfile
-              </button>
-              <button class="tab-button" type="button" role="tab" aria-selected="false" data-tab="certificate">
-                <span class="icon-slot" data-icon="merkleTree" data-size="16"></span>
-                Merkle and certificate
-              </button>
-              <button class="tab-button" type="button" role="tab" aria-selected="false" data-tab="sandbox">
-                <span class="icon-slot" data-icon="gitDiff" data-size="16"></span>
-                Diffs and compiler sandbox
-              </button>
+        <main class="dashboard-main" id="overview">
+          <section class="page-intro" aria-labelledby="hero-title">
+            <div>
+              <div class="eyebrow">REPRODUCIBILITY CONTROL PLANE / LIVE AUDIT</div>
+              <h1 id="hero-title">Cross-OS Bugs</h1>
+              <p>Find the assumptions that fail between workstation builds and a clean Linux room. Repair, compare, and certify without touching source.</p>
             </div>
+            <div class="run-state">
+              <span class="live-pulse"></span>
+              <div><strong id="audit-state">IDLE</strong><span id="audit-meta">Awaiting first audit</span></div>
+            </div>
+          </section>
 
-            <section class="tab-panel is-active" id="tab-landmines" data-panel="landmines" role="tabpanel">
-              <div class="dashboard-grid">
-                <article class="surface-card">
-                  <div class="card-heading">
-                    <div class="heading-title">
-                      <span class="heading-icon"><span class="icon-slot" data-icon="radarScan" data-size="16"></span></span>
-                      <div><h2>Portability landmines</h2><p>Hidden assumptions found in the active target.</p></div>
-                    </div>
-                    <span class="badge" id="landmine-count">0 findings</span>
-                  </div>
-                  <div class="issue-list" id="issue-list">
-                    <div class="empty-state">
-                      <span class="icon-slot" data-icon="radarScan" data-size="24"></span>
-                      <strong>Awaiting target scan</strong>
-                      <span>Run an audit to classify paths, lockfiles, runtimes, and environment assumptions.</span>
-                    </div>
-                  </div>
-                </article>
-                <aside class="surface-card">
-                  <div class="card-heading">
-                    <div class="heading-title">
-                      <span class="heading-icon"><span class="icon-slot" data-icon="shieldVerified" data-size="16"></span></span>
-                      <div><h2>Readiness pulse</h2><p>Weighted by deterministic evidence.</p></div>
-                    </div>
-                  </div>
-                  <div id="readiness-panel">
-                    <div class="score-layout">
-                      <div class="radial-gauge radial-gauge-warning" style="--gauge-size:132px" role="img" aria-label="Readiness pending">
-                        <svg viewBox="0 0 112 112" width="132" height="132" fill="none" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="loading-gauge-gradient" x1="18" y1="8" x2="94" y2="102" gradientUnits="userSpaceOnUse"><stop stop-color="#8B7CFF"/><stop offset="0.55" stop-color="#50D8FF"/><stop offset="1" stop-color="#5DE3A1"/></linearGradient><filter id="loading-gauge-glow" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="2" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs><circle class="gauge-track" cx="56" cy="56" r="48" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/><circle class="gauge-value" cx="56" cy="56" r="48" stroke="url(#loading-gauge-gradient)" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="301.59" stroke-dashoffset="301.59" transform="rotate(-90 56 56)" filter="url(#loading-gauge-glow)"/></svg>
-                        <div class="gauge-center"><strong>--</strong><span>%</span></div>
-                        <div class="gauge-label">Readiness</div>
-                      </div>
-                      <div class="score-copy"><div class="eyebrow">Current signal</div><strong id="readiness-headline">No audit yet</strong><p id="readiness-copy">The first audit will combine landmines, dependency lock evidence, and Linux readiness.</p></div>
-                    </div>
-                  </div>
-                </aside>
-              </div>
-            </section>
+          <section class="telemetry-grid" id="telemetry" aria-label="Audit telemetry">
+            <article class="telemetry-card telemetry-cyan">
+              <div class="telemetry-top"><span class="eyebrow">READINESS</span><span class="icon-slot" data-icon="shieldVerified" data-size="17"></span></div>
+              <strong class="telemetry-value" id="readiness-score">--</strong>
+              <span class="telemetry-meta" id="readiness-meta">Waiting for first audit</span>
+              <div class="telemetry-meter"><span id="readiness-meter"></span></div>
+            </article>
+            <article class="telemetry-card telemetry-red">
+              <div class="telemetry-top"><span class="eyebrow">OPEN FINDINGS</span><span class="icon-slot" data-icon="shieldAlert" data-size="17"></span></div>
+              <strong class="telemetry-value" id="open-issues">--</strong>
+              <span class="telemetry-meta" id="issues-meta">No findings loaded</span>
+              <div class="telemetry-meter"><span id="issues-meter"></span></div>
+            </article>
+            <article class="telemetry-card telemetry-green">
+              <div class="telemetry-top"><span class="eyebrow">MERKLE ROOT</span><span class="icon-slot" data-icon="merkleTree" data-size="17"></span></div>
+              <strong class="telemetry-value mono" id="root-hash">PENDING</strong>
+              <span class="telemetry-meta" id="root-meta">Certificate not generated</span>
+              <div class="telemetry-meter"><span></span></div>
+            </article>
+            <article class="telemetry-card telemetry-violet">
+              <div class="telemetry-top"><span class="eyebrow">AUDIT STATE</span><span class="icon-slot" data-icon="radarScan" data-size="17"></span></div>
+              <strong class="telemetry-value" id="audit-state-card">IDLE</strong>
+              <span class="telemetry-meta" id="audit-meta-card">Select scan to begin</span>
+              <div class="telemetry-meter"><span id="audit-meter"></span></div>
+            </article>
+          </section>
 
-            <section class="tab-panel" id="tab-apt" data-panel="apt" role="tabpanel">
-              <div class="dashboard-grid">
-                <article class="surface-card">
-                  <div class="card-heading">
-                    <div class="heading-title">
-                      <span class="heading-icon"><span class="icon-slot" data-icon="cpuCompiler" data-size="16"></span></span>
-                      <div><h2>APT and compiler telemetry</h2><p>Deterministic parser output with package recommendations.</p></div>
-                    </div>
-                    <button class="button" id="parse-log-button" type="button"><span class="icon-slot" data-icon="terminalPrompt" data-size="15"></span>Parse build log</button>
-                  </div>
-                  <div id="analysis-panel">
-                    <div class="empty-state"><span class="icon-slot" data-icon="cpuCompiler" data-size="24"></span><strong>No compiler telemetry</strong><span>Parse the active target build log to surface root cause and apt packages.</span></div>
-                  </div>
-                </article>
-                <aside class="surface-card">
-                  <div class="card-heading">
-                    <div class="heading-title">
-                      <span class="heading-icon"><span class="icon-slot" data-icon="dockerContainer" data-size="16"></span></span>
-                      <div><h2>Dockerfile repair</h2><p>Proposed hardening from the audit.</p></div>
-                    </div>
-                    <span class="badge" id="dockerfile-badge">Not checked</span>
-                  </div>
-                  <div id="dockerfile-panel">
-                    <div class="empty-state"><span class="icon-slot" data-icon="fileCode" data-size="24"></span><strong>Dockerfile evidence pending</strong><span>Run a scan to inspect deterministic base images and package layers.</span></div>
-                  </div>
-                </aside>
+          <section class="primary-grid">
+            <article class="panel issue-panel" id="bugs-panel" data-panel="landmines">
+              <div class="panel-heading">
+                <div class="panel-title"><span class="panel-icon"><span class="icon-slot" data-icon="radarScan" data-size="16"></span></span><div><div class="panel-kicker">01 / STATIC ANALYSIS</div><h2>Cross-OS Bugs</h2></div></div>
+                <div class="panel-heading-actions"><span class="table-count" id="landmine-count">0 FINDINGS</span><button class="icon-button" type="button" aria-label="Refresh audit" data-refresh-audit="true"><span class="icon-slot" data-icon="radarScan" data-size="15"></span></button></div>
               </div>
-            </section>
+              <div class="table-toolbar"><span class="toolbar-label">LANDMINE REGISTER</span><span class="toolbar-note">STATIC EVIDENCE / SOURCE TREE</span></div>
+              <div class="issue-list" id="issue-list">
+                <div class="empty-state"><span class="icon-slot" data-icon="radarScan" data-size="25"></span><strong>Awaiting target scan</strong><span>Run an audit to classify paths, lockfiles, runtimes, and environment assumptions.</span></div>
+              </div>
+            </article>
 
-            <section class="tab-panel" id="tab-certificate" data-panel="certificate" role="tabpanel">
-              <div class="dashboard-grid">
-                <article class="surface-card">
-                  <div class="card-heading">
-                    <div class="heading-title">
-                      <span class="heading-icon"><span class="icon-slot" data-icon="merkleTree" data-size="16"></span></span>
-                      <div><h2>Merkle evidence tree</h2><p>Content-addressed file evidence for this target.</p></div>
-                    </div>
-                     <div class="button-row">
-                       <button class="button" id="certify-button" type="button"><span class="icon-slot" data-icon="downloadCert" data-size="15"></span>Generate certificate</button>
-                       <button class="icon-button" id="copy-certificate-button" type="button" aria-label="Copy certificate JSON"><span class="icon-slot" data-icon="copyClipboard" data-size="15"></span></button>
-                       <button class="icon-button" id="download-certificate-button" type="button" aria-label="Download certificate JSON"><span class="icon-slot" data-icon="downloadCert" data-size="15"></span></button>
-                     </div>
-                  </div>
-                  <div class="merkle-tree-wrap" id="merkle-tree"><div class="empty-state"><span class="icon-slot" data-icon="merkleTree" data-size="24"></span><strong>Merkle root pending</strong><span>Generate or load an audit certificate to render the evidence tree.</span></div></div>
-                </article>
-                 <aside class="surface-card">
-                  <div class="card-heading">
-                    <div class="heading-title">
-                      <span class="heading-icon"><span class="icon-slot" data-icon="lockClosed" data-size="16"></span></span>
-                      <div><h2>Certification seal</h2><p>Signed-ready deterministic proof.</p></div>
-                    </div>
-                  </div>
-                  <div id="certificate-seal"><div class="empty-state"><span class="icon-slot" data-icon="shieldAlert" data-size="24"></span><strong>Certificate pending</strong><span>Run an audit to see verification state and root hash.</span></div></div>
-                  <div class="metric-stack" id="certificate-metrics" style="margin-top:16px"><div class="metric-line"><span>Runtime</span><strong>--</strong></div><div class="metric-line"><span>Lock score</span><strong>--</strong></div><div class="metric-line"><span>Linux readiness</span><strong>--</strong></div></div>
-                </aside>
+            <aside class="panel diff-panel" id="docker-panel" data-panel="apt">
+              <div class="panel-heading">
+                <div class="panel-title"><span class="panel-icon"><span class="icon-slot" data-icon="gitDiff" data-size="16"></span></span><div><div class="panel-kicker">02 / PROPOSED PATCH</div><h2>Git Diff / Dockerfile</h2></div></div>
+                <span class="table-count" id="dockerfile-badge">NOT CHECKED</span>
               </div>
-            </section>
+              <div class="diff-toolbar"><span class="diff-file"><span class="status-dot"></span>Dockerfile</span><span class="diff-branch">AUTO-HEAL STAGING</span></div>
+              <div id="dockerfile-panel"><div class="empty-state"><span class="icon-slot" data-icon="fileCode" data-size="25"></span><strong>Dockerfile evidence pending</strong><span>Run a scan to inspect deterministic base images and package layers.</span></div></div>
+            </aside>
+          </section>
 
-            <section class="tab-panel" id="tab-sandbox" data-panel="sandbox" role="tabpanel">
-              <div class="dashboard-grid">
-                <article class="surface-card">
-                  <div class="card-heading">
-                    <div class="heading-title">
-                      <span class="heading-icon"><span class="icon-slot" data-icon="gitDiff" data-size="16"></span></span>
-                      <div><h2>Diff sandbox</h2><p>Before and after evidence for healing operations.</p></div>
-                    </div>
-                    <button class="button" id="compare-button" type="button"><span class="icon-slot" data-icon="gitDiff" data-size="15"></span>Compare healed state</button>
-                  </div>
-                  <div id="diff-panel"><div class="empty-state"><span class="icon-slot" data-icon="gitDiff" data-size="24"></span><strong>No diff loaded</strong><span>Use auto-heal, then compare the exact certificate and file drift.</span></div></div>
-                </article>
-                <aside class="surface-card">
-                  <div class="card-heading">
-                    <div class="heading-title">
-                      <span class="heading-icon"><span class="icon-slot" data-icon="caseSensitive" data-size="16"></span></span>
-                      <div><h2>Compiler sandbox</h2><p>Normalized diagnostics from the latest parse.</p></div>
-                    </div>
-                   </div>
-                   <div class="compiler-sandbox">
-                     <div class="eyebrow">Custom compiler log sandbox</div>
-                     <textarea id="compiler-log-editor" class="log-editor" spellcheck="false" aria-label="Compiler log editor" placeholder="Paste a compiler trace here..."></textarea>
-                     <div class="preset-row">
-                       <button class="pill" type="button" data-log-preset="python">Python.h Missing</button>
-                       <button class="pill" type="button" data-log-preset="postgres">libpq / pg_config</button>
-                       <button class="pill" type="button" data-log-preset="opencv">Headless OpenCV libGL</button>
-                       <button class="pill" type="button" data-log-preset="rust">Rust / Cargo + OpenSSL</button>
-                       <button class="pill" type="button" data-log-preset="mysql">MySQL + CMake</button>
-                     </div>
-                     <button class="button button-primary" id="run-sandbox-button" type="button"><span class="icon-slot" data-icon="cpuCompiler" data-size="15"></span>Parse custom trace</button>
-                   </div>
-                   <div id="diagnostic-panel"><div class="empty-state"><span class="icon-slot" data-icon="cpuCompiler" data-size="24"></span><strong>No diagnostics</strong><span>Parse a build log to inspect exact tool, path, and line evidence.</span></div></div>
-                </aside>
+          <section class="execution-grid" id="logs">
+            <article class="panel terminal-drawer is-open" id="terminal-drawer" aria-label="Execution logs" aria-hidden="false">
+              <div class="panel-heading">
+                <div class="panel-title"><span class="panel-icon panel-icon-green"><span class="icon-slot" data-icon="terminalPrompt" data-size="16"></span></span><div><div class="panel-kicker">05 / RUNTIME TELEMETRY</div><h2>Execution Logs</h2></div></div>
+                <button class="button button-quiet button-small" id="drawer-toggle" type="button" aria-expanded="true" aria-controls="terminal-drawer"><span class="icon-slot" data-icon="terminalPrompt" data-size="14"></span>FOCUS</button>
               </div>
-            </section>
-          </div>
+              <div class="terminal-bar"><span class="terminal-dot terminal-dot-red"></span><span class="terminal-dot terminal-dot-yellow"></span><span class="terminal-dot terminal-dot-green"></span><span class="terminal-path">/var/log/worksonmymachine/audit.stream</span><span class="terminal-live">LIVE</span></div>
+              <pre class="terminal-output" id="terminal-output">[system] clean room ready</pre>
+            </article>
+
+            <aside class="panel readiness-panel-wrap">
+              <div class="panel-heading">
+                <div class="panel-title"><span class="panel-icon panel-icon-cyan"><span class="icon-slot" data-icon="shieldVerified" data-size="16"></span></span><div><div class="panel-kicker">SIGNAL</div><h2>Readiness Pulse</h2></div></div>
+              </div>
+              <div id="readiness-panel"><div class="readiness-mini"><div class="readiness-ring"><strong>--</strong><span>%</span></div><div><strong>Waiting for audit</strong><p>Readiness combines landmines, dependency locks, and Linux evidence.</p></div></div></div>
+            </aside>
+          </section>
+
+          <section class="tools-grid" id="tools">
+            <article class="panel tool-card" id="analysis-tool" data-panel="sandbox">
+              <div class="panel-heading">
+                <div class="panel-title"><span class="panel-icon"><span class="icon-slot" data-icon="cpuCompiler" data-size="16"></span></span><div><div class="panel-kicker">03 / BUILD TELEMETRY</div><h2>Compiler Sandbox</h2></div></div>
+                <button class="button button-quiet button-small" id="parse-log-button" type="button"><span class="icon-slot" data-icon="terminalPrompt" data-size="14"></span>PARSE TARGET LOG</button>
+              </div>
+              <div class="sandbox-box"><textarea id="compiler-log-editor" class="log-editor" spellcheck="false" aria-label="Compiler log editor" placeholder="Paste a compiler trace here or use a preset..."></textarea><div class="preset-row"><button class="pill" type="button" data-log-preset="python">Python.h</button><button class="pill" type="button" data-log-preset="postgres">libpq</button><button class="pill" type="button" data-log-preset="opencv">libGL</button><button class="pill" type="button" data-log-preset="rust">Rust / SSL</button><button class="pill" type="button" data-log-preset="mysql">MySQL</button><button class="button button-primary button-small" id="run-sandbox-button" type="button"><span class="icon-slot" data-icon="cpuCompiler" data-size="14"></span>PARSE TRACE</button></div></div>
+              <div id="analysis-panel"><div class="empty-state compact-empty"><span class="icon-slot" data-icon="cpuCompiler" data-size="22"></span><strong>No compiler telemetry</strong><span>Parse a build log to map the root cause to deterministic apt packages.</span></div></div>
+              <div id="diagnostic-panel"></div>
+            </article>
+
+            <article class="panel tool-card" id="certificate-tool" data-panel="certificate">
+              <div class="panel-heading">
+                <div class="panel-title"><span class="panel-icon panel-icon-green"><span class="icon-slot" data-icon="merkleTree" data-size="16"></span></span><div><div class="panel-kicker">04 / PROOF ARTIFACT</div><h2>Certificate</h2></div></div>
+                <div class="button-row"><button class="icon-button" id="copy-certificate-button" type="button" aria-label="Copy certificate JSON"><span class="icon-slot" data-icon="copyClipboard" data-size="14"></span></button><button class="icon-button" id="download-certificate-button" type="button" aria-label="Download certificate JSON"><span class="icon-slot" data-icon="downloadCert" data-size="14"></span></button></div>
+              </div>
+              <div id="certificate-seal"><div class="empty-state compact-empty"><span class="icon-slot" data-icon="shieldAlert" data-size="22"></span><strong>Certificate pending</strong><span>Generate a deterministic Merkle proof after the audit.</span></div></div>
+              <div class="certificate-actions"><button class="button button-primary button-small" id="certify-button" type="button"><span class="icon-slot" data-icon="downloadCert" data-size="14"></span>GENERATE CERTIFICATE</button><button class="button button-quiet button-small" id="compare-button" type="button"><span class="icon-slot" data-icon="gitDiff" data-size="14"></span>COMPARE HEALED</button></div>
+              <div class="metric-stack" id="certificate-metrics"><div class="metric-line"><span>Runtime</span><strong>--</strong></div><div class="metric-line"><span>Lock score</span><strong>--</strong></div><div class="metric-line"><span>Linux readiness</span><strong>--</strong></div></div>
+              <div class="sr-only" id="merkle-tree"><span>Merkle root pending</span></div>
+              <div class="sr-only" id="comparison-panel"><span>Comparison pending</span></div>
+            </article>
+          </section>
         </main>
       </div>
-
-      <button class="drawer-toggle" id="drawer-toggle" type="button" aria-expanded="false" aria-controls="terminal-drawer">
-        <span class="icon-slot" data-icon="terminalPrompt" data-size="16"></span>
-        Live telemetry
-      </button>
-      <aside class="terminal-drawer" id="terminal-drawer" aria-label="Terminal telemetry drawer" aria-hidden="true">
-        <div class="card-heading">
-          <div class="heading-title"><span class="heading-icon"><span class="icon-slot" data-icon="terminalPrompt" data-size="16"></span></span><div><h2>Terminal telemetry</h2><p>Local request and evidence timeline.</p></div></div>
-          <button class="icon-button" id="drawer-close" type="button" aria-label="Close telemetry"><span class="icon-slot" data-icon="chevronRight" data-size="15"></span></button>
-        </div>
-        <pre class="terminal-output" id="terminal-output">[system] clean room ready</pre>
-      </aside>
       <div class="toast" id="toast" role="status" aria-live="polite"></div>
     </div>
     <script src="/static/icons.js"></script>

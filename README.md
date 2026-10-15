@@ -106,6 +106,19 @@ curl --request POST http://127.0.0.1:8000/api/v1/heal-dockerfile \
   --data '{"target":"nightmare_ml_service"}'
 ```
 
+The same workflow is available from the local CLI:
+
+```bash
+PYTHONPATH=src python -m worksonmymachine scan nightmare_ml_service
+PYTHONPATH=src python -m worksonmymachine parse-log nightmare_ml_service
+PYTHONPATH=src python -m worksonmymachine certify nightmare_ml_service --json
+PYTHONPATH=src python -m worksonmymachine heal nightmare_ml_service --json
+```
+
+The certificate Merkle root contains only normalized file content and relative
+POSIX paths. Filesystem timestamps, ownership, inode values, and enumeration
+order are deliberately excluded.
+
 ## Docker build and run
 
 ```bash

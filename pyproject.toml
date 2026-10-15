@@ -8,3 +8,6 @@ filterwarnings = [
 
 [tool.ruff]
 line-length = 88
+
+[project.scripts]
+worksonmymachine = "worksonmymachine.cli:main"

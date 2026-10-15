@@ -165,9 +165,10 @@ def test_heal_dockerfile_endpoint_supports_target_and_custom_content() -> None:
     assert "python3-dev" in custom_body["apt_packages"]
 
     for body in (target_body, custom_body):
-        staged_path = Path(body["staged_output_path"])
-        if staged_path.is_dir():
-            shutil.rmtree(staged_path)
+        if body["staged_output_path"]:
+            staged_path = Path(body["staged_output_path"])
+            if staged_path.is_dir():
+                shutil.rmtree(staged_path)
 
 
 def test_full_repository_heal_includes_dockerfile_apt_hardening(tmp_path: Path) -> None:

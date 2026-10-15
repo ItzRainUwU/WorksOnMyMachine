@@ -16,6 +16,13 @@ from .models import (
     DockerfilePatchResult,
     HealResult,
     LandmineIssue,
+    AuditReport,
+    ReproducibilityCertificate,
+)
+from .repro_hash import (
+    compare_certificates,
+    generate_certificate,
+    run_full_audit,
 )
 from .scanner import heal_repository, readiness_score, scan_repository
 
@@ -72,6 +79,26 @@ class DockerfileHealRequest(BaseModel):
     target: str | None = None
     dockerfile_content: str | None = None
     log_text: str | None = None
+
+
+class CompareRequest(BaseModel):
+    """Compare two targets or a target before and after copy-on-write healing."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    target_a: str | None = None
+    target_b: str | None = None
+    target: str | None = None
+    auto_heal: bool = False
+
+
+class AuditRequest(BaseModel):
+    """Request a full scanner, build-log, Dockerfile, and certificate audit."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    target: str = Field(min_length=1)
+    auto_heal: bool = False
 
 
 @app.get("/health")
@@ -215,7 +242,11 @@ def heal_dockerfile_endpoint(request: DockerfileHealRequest) -> DockerfilePatchR
     if has_target:
         try:
             target_path = _resolve_target(request.target or "")
-            return heal_dockerfile(target_path)
+            result = heal_dockerfile(target_path)
+            staged = result.staged_output_path
+            if staged:
+                shutil.rmtree(staged, ignore_errors=True)
+            return result.model_copy(update={"staged_output_path": None})
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -230,8 +261,69 @@ def heal_dockerfile_endpoint(request: DockerfileHealRequest) -> DockerfilePatchR
                 request.log_text,
                 encoding="utf-8",
             )
-        return heal_dockerfile(input_path)
+        result = heal_dockerfile(input_path)
+        staged = result.staged_output_path
+        if staged:
+            shutil.rmtree(staged, ignore_errors=True)
+        return result.model_copy(update={"staged_output_path": None})
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
         shutil.rmtree(input_path, ignore_errors=True)
+
+
+@app.post("/api/v1/certify", response_model=ReproducibilityCertificate)
+def certify(request: TargetRequest) -> ReproducibilityCertificate:
+    """Generate a deterministic reproducibility certificate for a target."""
+
+    try:
+        target_path = _resolve_target(request.target)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return generate_certificate(target_path)
+
+
+@app.post("/api/v1/compare")
+def compare(request: CompareRequest) -> dict[str, object]:
+    """Return exact file and score drift between certificates."""
+
+    try:
+        if request.target:
+            if request.target_a or request.target_b:
+                raise ValueError("target cannot be combined with target_a or target_b")
+            if not request.auto_heal:
+                raise ValueError("target comparisons require auto_heal=true")
+            report = run_full_audit(_resolve_target(request.target), auto_heal=True)
+            if report.before_certificate is None or report.after_certificate is None:
+                raise ValueError("healed comparison did not produce two certificates")
+            drift = compare_certificates(
+                report.before_certificate,
+                report.after_certificate,
+            )
+            return {
+                **drift,
+                "before_certificate": report.before_certificate.model_dump(mode="json"),
+                "after_certificate": report.after_certificate.model_dump(mode="json"),
+            }
+        if not request.target_a or not request.target_b or request.auto_heal:
+            raise ValueError("provide target_a and target_b, or target with auto_heal=true")
+        first = generate_certificate(_resolve_target(request.target_a))
+        second = generate_certificate(_resolve_target(request.target_b))
+        return {
+            **compare_certificates(first, second),
+            "before_certificate": first.model_dump(mode="json"),
+            "after_certificate": second.model_dump(mode="json"),
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/audit", response_model=AuditReport)
+def audit(request: AuditRequest) -> AuditReport:
+    """Run the unified offline audit workflow for a target."""
+
+    try:
+        target_path = _resolve_target(request.target)
+        return run_full_audit(target_path, auto_heal=request.auto_heal)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc

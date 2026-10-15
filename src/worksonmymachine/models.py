@@ -165,6 +165,8 @@ class FileHashNode(_StrictModel):
     path: str
     digest: str = Field(min_length=1)
     size_bytes: int = Field(ge=0)
+    raw_sha256: str = ""
+    has_crlf: bool = False
     children: list["FileHashNode"] = Field(default_factory=list)
 
     _validate_path = field_validator("path")(_relative_posix_path)
@@ -182,6 +184,20 @@ class ReproducibilityCertificate(_StrictModel):
     dependency_lock_hash: str | None = None
     verified: bool = False
     issues: list[LandmineIssue] = Field(default_factory=list)
+    # Phase 4 evidence.  All of these fields have defaults so certificates
+    # produced by earlier phases remain valid API payloads.
+    file_nodes: list[FileHashNode] = Field(default_factory=list)
+    dependency_lock_score: float = Field(default=0.0, ge=0.0, le=100.0)
+    linux_readiness_score: float = Field(default=0.0, ge=0.0, le=100.0)
+    dockerfile_hardened: bool = False
+    verification_hash: str = ""
+    is_cleanroom_certified: bool = False
+
+    @property
+    def merkle_root(self) -> str:
+        """Compatibility alias for callers using the descriptive name."""
+
+        return self.root_hash
 
 
 class AuditReport(_StrictModel):
@@ -197,6 +213,18 @@ class AuditReport(_StrictModel):
     dockerfile_patches: list[DockerfilePatchResult] = Field(default_factory=list)
     merkle_root: str | None = None
     certificate: ReproducibilityCertificate | None = None
+    before_certificate: ReproducibilityCertificate | None = None
+    after_certificate: ReproducibilityCertificate | None = None
+    dockerfile_patch: DockerfilePatchResult | None = None
+    unified_diffs: list[str] = Field(default_factory=list)
+    compiler_diagnostics: list[CompilerDiagnostic] = Field(default_factory=list)
+    timeline: list[dict[str, Any]] = Field(default_factory=list)
+
+    @property
+    def timeline_data(self) -> list[dict[str, Any]]:
+        """Compatibility alias for consumers using the descriptive name."""
+
+        return self.timeline
 
     _validate_target = field_validator("target")(_relative_posix_path)
 

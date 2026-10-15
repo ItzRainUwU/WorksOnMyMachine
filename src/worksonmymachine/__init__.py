@@ -17,6 +17,14 @@ from .models import (
 )
 from .scanner import heal_repository, readiness_score, scan_repository
 from .apt_healer import analyze_log_hybrid, heal_dockerfile, parse_compiler_log
+from .repro_hash import (
+    calculate_dependency_lock_score,
+    compare_certificates,
+    compute_file_hash,
+    compute_merkle_root,
+    generate_certificate,
+    run_full_audit,
+)
 
 __all__ = [
     "AuditReport",
@@ -34,5 +42,11 @@ __all__ = [
     "analyze_log_hybrid",
     "heal_dockerfile",
     "parse_compiler_log",
+    "calculate_dependency_lock_score",
+    "compare_certificates",
+    "compute_file_hash",
+    "compute_merkle_root",
+    "generate_certificate",
+    "run_full_audit",
     "__version__",
 ]

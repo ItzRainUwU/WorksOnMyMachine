@@ -118,6 +118,31 @@ def test_heal_dockerfile_is_copy_on_write_and_hardens_image(
     assert after_snapshot == snapshot
 
 
+def test_dockerfile_healer_preserves_external_symlinks_in_staging(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target"
+    outside = tmp_path / "outside"
+    target.mkdir()
+    outside.mkdir()
+    (target / "Dockerfile.broken").write_text(
+        "FROM python:latest\nCOPY entrypoint.sh /entrypoint.sh\nCMD [\"./entrypoint.sh\"]\n",
+        encoding="utf-8",
+    )
+    external_file = outside / "entrypoint.sh"
+    external_file.write_text("#!/bin/sh\necho outside\n", encoding="utf-8")
+    link = target / "entrypoint.sh"
+    try:
+        link.symlink_to(external_file)
+    except OSError:
+        pytest.skip("symlink creation is unavailable on this platform")
+
+    result = heal_dockerfile(target, tmp_path / "output")
+
+    assert result.applied is True
+    assert (tmp_path / "output" / "entrypoint.sh").is_symlink()
+
+
 def test_parse_log_endpoint_supports_target_and_raw_log() -> None:
     client = TestClient(app)
     target_response = client.post(

@@ -109,7 +109,12 @@ def _iter_files(root: Path) -> list[Path]:
             return
         for entry in entries:
             try:
-                if entry.is_dir() and not entry.is_symlink():
+                # Keep symlinks in staged copies, but never scan through them.
+                # Repair functions write in place and could otherwise write
+                # through a link to a file outside the target tree.
+                if entry.is_symlink():
+                    continue
+                if entry.is_dir():
                     walk(entry)
                 elif entry.is_file():
                     found.append(entry)
@@ -907,6 +912,8 @@ def _repair_env(target: Path, keys: set[str]) -> tuple[str, str]:
     if not keys:
         return "", ""
     path = target / ".env.example"
+    if path.is_symlink():
+        return "", ""
     try:
         before = path.read_text(encoding="utf-8") if path.is_file() else ""
     except (OSError, UnicodeError):
@@ -1009,12 +1016,15 @@ def _collect_env_keys(target: Path) -> set[str]:
 
 
 def _copy_tree(target: Path, output: Path) -> None:
-    if output.is_dir():
+    if output.is_symlink():
+        output.unlink()
+    elif output.is_dir():
         shutil.rmtree(output)
-    elif output.is_file() or output.is_symlink():
+    elif output.is_file():
         output.unlink()
     output.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(target, output)
+    # Preserve links rather than copying data from outside the target tree.
+    shutil.copytree(target, output, symlinks=True)
 
 
 def _ensure_requirements_lock(output: Path, changed_files: dict[str, tuple[str, str]]) -> None:
@@ -1022,7 +1032,12 @@ def _ensure_requirements_lock(output: Path, changed_files: dict[str, tuple[str, 
 
     requirements = output / "requirements.txt"
     lock = output / "requirements.lock"
-    if not requirements.is_file() or lock.is_file():
+    if (
+        requirements.is_symlink()
+        or lock.is_symlink()
+        or not requirements.is_file()
+        or lock.is_file()
+    ):
         return
     try:
         content = requirements.read_text(encoding="utf-8")

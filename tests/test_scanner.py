@@ -1,7 +1,6 @@
 """Phase 2 scanner, healer, and API integration tests."""
 
 from pathlib import Path
-import shutil
 
 import pytest
 from fastapi.testclient import TestClient
@@ -160,8 +159,31 @@ def test_heal_endpoint_returns_clean_result_and_diffs() -> None:
     assert body["unified_diffs"]
 
     output_path = Path(body["output_path"])
-    if output_path.is_dir():
-        shutil.rmtree(output_path)
+    assert not output_path.exists()
+
+
+def test_healer_preserves_external_symlinks_without_scanning_through_them(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target"
+    outside = tmp_path / "outside"
+    target.mkdir()
+    outside.mkdir()
+    external_file = outside / "entrypoint.sh"
+    external_file.write_bytes(b"#!/bin/sh\r\necho outside\r\n")
+    link = target / "entrypoint.sh"
+    try:
+        link.symlink_to(external_file)
+    except OSError:
+        pytest.skip("symlink creation is unavailable on this platform")
+
+    output = tmp_path / "output"
+    before = external_file.read_bytes()
+    result = heal_repository(target, output)
+
+    assert (output / "entrypoint.sh").is_symlink()
+    assert external_file.read_bytes() == before
+    assert result.remaining_issues == []
 
 
 def test_api_rejects_workspace_escape() -> None:

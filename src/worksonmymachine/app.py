@@ -188,7 +188,14 @@ def heal(request: TargetRequest) -> HealResult:
 
     try:
         target_path = _resolve_target(request.target)
-        result = heal_repository(target_path)
+        # HTTP healing is a one-shot operation. Keep its staging directory
+        # private to the request and remove it before returning; the result
+        # still records the cleaned staging location for a complete response.
+        staging = Path(tempfile.mkdtemp(prefix="worksonmymachine-api-healed-"))
+        try:
+            result = heal_repository(target_path, staging)
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return result

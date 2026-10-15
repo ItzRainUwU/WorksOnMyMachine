@@ -202,29 +202,71 @@ def _read_text(path: Path) -> str:
         return ""
 
 
-def _requirement_status(path: Path) -> tuple[int, int, set[str]]:
-    """Return declared count, unpinned count, and exact pin names."""
+def _requirement_declarations(path: Path) -> list[tuple[str, str]]:
+    """Return normalized requirement names and their version specifications."""
 
-    declared = 0
-    unpinned = 0
-    pinned_names: set[str] = set()
+    declarations: list[tuple[str, str]] = []
     for raw_line in _read_text(path).splitlines():
         line = raw_line.strip()
         if not line or line.startswith(("#", "-r", "--")):
             continue
         match = _REQUIREMENT_LINE.match(line)
         if match is None:
-            declared += 1
-            unpinned += 1
+            declarations.append(("", ""))
             continue
-        declared += 1
         name = match.group("name").lower().replace("_", "-")
         spec = match.group("spec").strip()
-        if re.match(r"^==\s*[^=\s]+(?:\s|$)", spec):
-            pinned_names.add(name)
-        else:
-            unpinned += 1
-    return declared, unpinned, pinned_names
+        declarations.append((name, spec))
+    return declarations
+
+
+def _requirement_status(path: Path) -> tuple[int, int, set[str]]:
+    """Return declared count, unpinned count, and exact pin names."""
+
+    declarations = _requirement_declarations(path)
+    pinned_names = {
+        name
+        for name, spec in declarations
+        if name and re.match(r"^==\s*[^=\s]+(?:\s|$)", spec)
+    }
+    return len(declarations), len(declarations) - len(pinned_names), pinned_names
+
+
+def _pinned_requirement_version(specification: str) -> str | None:
+    match = re.match(r"^==\s*([^=\s,;]+)", specification.strip())
+    return match.group(1) if match else None
+
+
+def _read_requirements_lock(path: Path) -> tuple[bool, dict[str, str]]:
+    """Parse a local requirements lock and return its exact pins.
+
+    A lock containing only comments, directives, malformed lines, or floating
+    requirements is not useful evidence for a reproducible installation.  The
+    parser intentionally accepts hash suffixes and common pip comments while
+    keeping the package/version portion strict and deterministic.
+    """
+
+    entries: dict[str, str] = {}
+    saw_requirement = False
+    for raw_line in _read_text(path).splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith(("-", "--")):
+            continue
+        match = _REQUIREMENT_LINE.match(line)
+        if match is None:
+            return False, {}
+        name = match.group("name").lower().replace("_", "-")
+        version = _pinned_requirement_version(match.group("spec"))
+        if not version:
+            return False, {}
+        previous = entries.get(name)
+        if previous is not None and previous != version:
+            return False, {}
+        entries[name] = version
+        saw_requirement = True
+    return saw_requirement, entries
 
 
 def _toml_dependencies(path: Path) -> tuple[list[str], bool]:
@@ -247,6 +289,87 @@ def _toml_dependencies(path: Path) -> tuple[list[str], bool]:
 def _dependency_name(specification: str) -> str:
     match = re.match(r"\s*([A-Za-z0-9_.-]+)", specification)
     return (match.group(1) if match else "").lower().replace("_", "-")
+
+
+def _cargo_dependency_is_pinned(specification: Any) -> bool:
+    """Return whether a Cargo dependency uses an exact, immutable source."""
+
+    if isinstance(specification, str):
+        return bool(re.fullmatch(r"\s*=\s*v?\d+(?:\.\d+)+(?:[-+][^\s]+)?\s*", specification))
+    if not isinstance(specification, dict):
+        return False
+    version = specification.get("version")
+    if isinstance(version, str) and _cargo_dependency_is_pinned(version):
+        return True
+    # A revision identifies an immutable git source.  A branch or tag does
+    # not, and a bare git URL therefore remains floating.
+    if isinstance(specification.get("rev"), str) and specification["rev"].strip():
+        return True
+    # A path dependency is content-addressed by the project tree itself.
+    return isinstance(specification.get("path"), str) and bool(specification["path"].strip())
+
+
+def _cargo_dependency_status(
+    path: Path,
+) -> tuple[int, int, set[str], set[str], bool]:
+    """Return Cargo dependency counts, names, and manifest validity."""
+
+    text = _read_text(path)
+    if not text:
+        return 0, 0, set(), set(), False
+    try:
+        parsed = tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        return 0, 0, set(), set(), False
+
+    declared = 0
+    pinned = 0
+    names: set[str] = set()
+    pinned_names: set[str] = set()
+
+    def visit(value: Any, key: str = "") -> None:
+        nonlocal declared, pinned
+        if isinstance(value, dict):
+            if key.endswith("dependencies"):
+                for dependency_name, specification in value.items():
+                    declared += 1
+                    names.add(str(dependency_name).lower().replace("_", "-"))
+                    if _cargo_dependency_is_pinned(specification):
+                        pinned += 1
+                        pinned_names.add(str(dependency_name).lower().replace("_", "-"))
+            else:
+                for child_key, child_value in value.items():
+                    visit(child_value, str(child_key))
+
+    visit(parsed)
+    return declared, pinned, names, pinned_names, True
+
+
+def _cargo_lock_package_names(path: Path) -> set[str] | None:
+    """Return resolved package names when a Cargo lock has valid TOML shape."""
+
+    text = _read_text(path)
+    if not text:
+        return None
+    try:
+        parsed = tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        return None
+    if not isinstance(parsed.get("version"), int):
+        return None
+    packages = parsed.get("package")
+    if not isinstance(packages, list) or not packages:
+        return None
+    package_names: set[str] = set()
+    for package in packages:
+        if not isinstance(package, dict):
+            return None
+        name = package.get("name")
+        version = package.get("version")
+        if not isinstance(name, str) or not isinstance(version, str):
+            return None
+        package_names.add(name.lower().replace("_", "-"))
+    return package_names
 
 
 def _pinned_image(image: str) -> bool:
@@ -312,6 +435,7 @@ def calculate_dependency_lock_score(target_path: Path) -> float:
     pinned_dependencies = 0
     lock_score = 100.0
     pinned_requirement_names: set[str] = set()
+    declared_requirement_specs: list[tuple[str, str]] = []
     requirement_files = [
         (path, relative)
         for path, relative in _iter_files(target)
@@ -321,15 +445,11 @@ def calculate_dependency_lock_score(target_path: Path) -> float:
     for path, _ in requirement_files:
         if path.name.lower() == "requirements.lock":
             continue
+        declared_requirement_specs.extend(_requirement_declarations(path))
         declared, unpinned, names = _requirement_status(path)
         declared_dependencies += declared
         pinned_dependencies += declared - unpinned
         pinned_requirement_names.update(names)
-
-    if any(path.name.lower() == "requirements.txt" for path, _ in requirement_files) and not any(
-        path.name.lower() == "requirements.lock" for path, _ in requirement_files
-    ):
-        lock_score = 0.0
 
     for path, _ in _iter_files(target):
         if path.name.lower() != "pyproject.toml":
@@ -339,6 +459,10 @@ def calculate_dependency_lock_score(target_path: Path) -> float:
             continue
         for dependency in dependencies:
             name = _dependency_name(dependency)
+            requirement = _REQUIREMENT_LINE.match(dependency)
+            declared_requirement_specs.append(
+                (name, requirement.group("spec").strip() if requirement else "")
+            )
             declared_dependencies += 1
             if name in pinned_requirement_names:
                 pinned_dependencies += 1
@@ -346,18 +470,66 @@ def calculate_dependency_lock_score(target_path: Path) -> float:
             if re.search(r"==\s*[^=\s,;]+", dependency):
                 pinned_dependencies += 1
 
+    lock_paths = [
+        path for path, _ in requirement_files if path.name.lower() == "requirements.lock"
+    ]
+    if declared_requirement_specs and not lock_paths:
+        lock_score = 0.0
+    elif lock_paths:
+        lock_entries: dict[str, str] = {}
+        if len(lock_paths) != 1:
+            lock_score = 0.0
+        else:
+            valid_lock, lock_entries = _read_requirements_lock(lock_paths[0])
+            if not valid_lock:
+                lock_score = 0.0
+            else:
+                for name, specification in declared_requirement_specs:
+                    if not name:
+                        lock_score = 0.0
+                        break
+                    locked_version = lock_entries.get(name)
+                    if locked_version is None:
+                        lock_score = 0.0
+                        break
+                    declared_version = _pinned_requirement_version(specification)
+                    if declared_version is not None and declared_version != locked_version:
+                        lock_score = 0.0
+                        break
+
     cargo_manifests = [path for path, _ in _iter_files(target) if path.name == "Cargo.toml"]
     cargo_locks = [path for path, _ in _iter_files(target) if path.name == "Cargo.lock"]
     if cargo_manifests:
         if not cargo_locks:
             lock_score = 0.0
         else:
-            for lock in cargo_locks:
-                lock_text = _read_text(lock)
-                if "[[package]]" not in lock_text or not re.search(
-                    r"(?m)^version\s*=\s*[\"'][^\"']+[\"']", lock_text
-                ):
+            cargo_lock_packages: set[str] = set()
+            for manifest in cargo_manifests:
+                _, _, cargo_names, cargo_pinned_names, manifest_valid = (
+                    _cargo_dependency_status(manifest)
+                )
+                if not manifest_valid:
                     lock_score = 0.0
+                    continue
+                for lock in cargo_locks:
+                    package_names = _cargo_lock_package_names(lock)
+                    if package_names is None:
+                        lock_score = 0.0
+                        break
+                    cargo_lock_packages.update(package_names)
+                # A stale lock can contain only the workspace package.  Do
+                # not invent resolution evidence for dependencies it does not
+                # describe; when direct packages are present, their manifest
+                # specs contribute to the pin score below.
+                resolved_names = cargo_names & cargo_lock_packages
+                if resolved_names:
+                    declared_dependencies += len(cargo_names)
+                    pinned_dependencies += len(resolved_names & cargo_pinned_names)
+                elif not declared_requirement_specs:
+                    # A standalone Cargo project must not receive a perfect
+                    # pin score when its lock lacks all declared packages.
+                    declared_dependencies += len(cargo_names)
+                    pinned_dependencies += len(cargo_names & cargo_pinned_names)
 
     for path, _ in _iter_files(target):
         if path.name.lower() != "package-lock.json":

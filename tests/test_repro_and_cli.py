@@ -12,6 +12,7 @@ from worksonmymachine.app import app
 from worksonmymachine.cli import main
 from worksonmymachine.models import FileHashNode
 from worksonmymachine.repro_hash import (
+    calculate_dependency_lock_score,
     compare_certificates,
     compute_file_hash,
     compute_merkle_root,
@@ -22,6 +23,36 @@ from worksonmymachine.repro_hash import (
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEMO_ROOT = PROJECT_ROOT / "demo_targets"
+
+
+def test_empty_requirements_lock_cannot_certify_a_target(tmp_path: Path) -> None:
+    (tmp_path / "requirements.txt").write_text("requests==2.32.3\n", encoding="utf-8")
+    (tmp_path / "requirements.lock").write_text("", encoding="utf-8")
+    (tmp_path / "Dockerfile").write_text(
+        "FROM python:3.11.9-slim\nUSER appuser\n", encoding="utf-8"
+    )
+
+    certificate = generate_certificate(tmp_path)
+
+    assert certificate.dependency_lock_score < 100.0
+    assert certificate.is_cleanroom_certified is False
+
+
+def test_floating_cargo_dependency_counts_against_lock_score(tmp_path: Path) -> None:
+    (tmp_path / "Cargo.toml").write_text(
+        '[package]\nname = "fixture"\nversion = "0.1.0"\n\n'
+        '[dependencies]\nopenssl = "0.10"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "Cargo.lock").write_text(
+        'version = 3\n\n'
+        '[[package]]\nname = "fixture"\nversion = "0.1.0"\n'
+        'dependencies = ["openssl"]\n\n'
+        '[[package]]\nname = "openssl"\nversion = "0.10.68"\n',
+        encoding="utf-8",
+    )
+
+    assert calculate_dependency_lock_score(tmp_path) < 100.0
 
 
 def test_merkle_root_is_independent_of_creation_order_and_mtime(tmp_path: Path) -> None:

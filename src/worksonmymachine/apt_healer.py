@@ -337,12 +337,15 @@ def analyze_log_hybrid(log_text: str) -> HybridAnalysisResult:
 
 
 def _copy_target(target: Path, output: Path) -> None:
-    if output.is_dir():
+    if output.is_symlink():
+        output.unlink()
+    elif output.is_dir():
         shutil.rmtree(output)
-    elif output.exists() or output.is_symlink():
+    elif output.exists():
         output.unlink()
     output.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(target, output)
+    # Preserve links rather than copying data from outside the target tree.
+    shutil.copytree(target, output, symlinks=True)
 
 
 def _safe_output(target: Path, output_path: Path | None) -> Path:
@@ -370,10 +373,10 @@ def _safe_output(target: Path, output_path: Path | None) -> Path:
 
 def _dockerfile_path(target: Path) -> Path:
     broken = target / "Dockerfile.broken"
-    if broken.is_file():
+    if broken.is_file() and not broken.is_symlink():
         return broken
     regular = target / "Dockerfile"
-    if regular.is_file():
+    if regular.is_file() and not regular.is_symlink():
         return regular
     raise ValueError("target_path does not contain Dockerfile or Dockerfile.broken")
 
@@ -562,11 +565,18 @@ def _native_and_rust_packages(
     source_indicators: list[str] = []
     if target is not None:
         try:
-            source_indicators = [
-                path.name.lower()
-                for path in target.rglob("*")
-                if path.is_file()
-            ]
+            for directory, dirnames, filenames in os.walk(target, followlinks=False):
+                directory_path = Path(directory)
+                dirnames[:] = [
+                    name
+                    for name in dirnames
+                    if not (directory_path / name).is_symlink()
+                ]
+                source_indicators.extend(
+                    name.lower()
+                    for name in filenames
+                    if not (directory_path / name).is_symlink()
+                )
         except OSError:
             source_indicators = []
     packages: set[str] = set()
@@ -593,11 +603,21 @@ def _native_and_rust_packages(
 
 
 def _write_staged_entrypoint_modes(output: Path) -> None:
-    for path in output.rglob("*.sh"):
-        try:
-            path.chmod(path.stat().st_mode | 0o111)
-        except OSError:
-            continue
+    for directory, dirnames, filenames in os.walk(output, followlinks=False):
+        directory_path = Path(directory)
+        dirnames[:] = [
+            name for name in dirnames if not (directory_path / name).is_symlink()
+        ]
+        for name in filenames:
+            if not name.endswith(".sh"):
+                continue
+            path = directory_path / name
+            try:
+                if path.is_symlink() or not path.is_file():
+                    continue
+                path.chmod(path.stat().st_mode | 0o111)
+            except OSError:
+                continue
 
 
 def heal_dockerfile(target_path: Path, output_path: Path | None = None) -> DockerfilePatchResult:
@@ -612,7 +632,11 @@ def heal_dockerfile(target_path: Path, output_path: Path | None = None) -> Docke
     staged_dockerfile = output / dockerfile.relative_to(target)
     before = staged_dockerfile.read_text(encoding="utf-8")
     log_path = target / "build_error.log"
-    log_text = log_path.read_text(encoding="utf-8") if log_path.is_file() else ""
+    log_text = (
+        log_path.read_text(encoding="utf-8")
+        if log_path.is_file() and not log_path.is_symlink()
+        else ""
+    )
     analysis = analyze_log_hybrid(log_text)
     packages = set(analysis.apt_packages)
     packages.update(_native_and_rust_packages(log_text, before, target))

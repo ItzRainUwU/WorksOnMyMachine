@@ -60,6 +60,10 @@ class LandmineIssue(_StrictModel):
 class CompilerDiagnostic(_StrictModel):
     """Normalized compiler or package-manager output."""
 
+    # Keep raw compiler output intact so an API consumer can inspect the exact
+    # evidence that produced the normalized finding.
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=False)
+
     tool: str = Field(min_length=1)
     message: str = Field(min_length=1)
     severity: SeverityLevel = SeverityLevel.HIGH
@@ -68,6 +72,20 @@ class CompilerDiagnostic(_StrictModel):
     column: int | None = Field(default=None, ge=1)
     code: str | None = None
     raw_output: str | None = None
+    error_signature: str = "unclassified-build-error"
+    missing_artifact: str | None = None
+    recommended_apt_packages: list[str] = Field(default_factory=list)
+    root_cause_explanation: str = ""
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+
+    @field_validator("recommended_apt_packages", mode="before")
+    @classmethod
+    def _sort_apt_packages(cls, value: list[str] | None) -> list[str]:
+        """Keep package recommendations stable and free of duplicates."""
+
+        if value is None:
+            return []
+        return sorted({str(package).strip() for package in value if str(package).strip()})
 
     _validate_file_path = field_validator("file_path")(_relative_posix_path)
 
@@ -75,13 +93,70 @@ class CompilerDiagnostic(_StrictModel):
 class DockerfilePatchResult(_StrictModel):
     """A proposed or applied deterministic Dockerfile repair."""
 
+    # Dockerfile content and unified diffs are byte-for-byte evidence; the
+    # shared API model's whitespace stripping would otherwise remove a final
+    # newline from these fields.
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=False)
+
     source_path: str
     patched_content: str
     changes: list[str] = Field(default_factory=list)
     applied: bool = False
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    before_content: str = ""
+    after_content: str = ""
+    unified_diff: str = ""
+    apt_packages: list[str] = Field(default_factory=list)
+    security_fixes: list[str] = Field(default_factory=list)
+    staged_output_path: str | None = None
+
+    @field_validator("apt_packages", mode="before")
+    @classmethod
+    def _sort_patch_packages(cls, value: list[str] | None) -> list[str]:
+        """Keep Dockerfile package layers reproducible."""
+
+        if value is None:
+            return []
+        return sorted({str(package).strip() for package in value if str(package).strip()})
 
     _validate_source_path = field_validator("source_path")(_relative_posix_path)
+
+    @property
+    def diff(self) -> str:
+        """Compatibility alias for callers that use the short diff name."""
+
+        return self.unified_diff
+
+    @property
+    def output_path(self) -> str | None:
+        """Compatibility alias for the copied/staged target directory."""
+
+        return self.staged_output_path
+
+    @property
+    def recommended_apt_packages(self) -> list[str]:
+        """Expose the package list under the parser's vocabulary as well."""
+
+        return self.apt_packages
+
+
+class HybridAnalysisResult(_StrictModel):
+    """Structured output from deterministic parsing plus optional LLM context."""
+
+    diagnostics: list[CompilerDiagnostic] = Field(default_factory=list)
+    apt_packages: list[str] = Field(default_factory=list)
+    recommended_apt_packages: list[str] = Field(default_factory=list)
+    root_cause_summary: str = ""
+    llm_used: bool = False
+
+    @field_validator("apt_packages", "recommended_apt_packages", mode="before")
+    @classmethod
+    def _sort_analysis_packages(cls, value: list[str] | None) -> list[str]:
+        """Normalize both package-name aliases to sorted unique values."""
+
+        if value is None:
+            return []
+        return sorted({str(package).strip() for package in value if str(package).strip()})
 
 
 class FileHashNode(_StrictModel):

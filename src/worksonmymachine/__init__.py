@@ -10,11 +10,13 @@ from .models import (
     DockerfilePatchResult,
     FileHashNode,
     HealResult,
+    HybridAnalysisResult,
     LandmineIssue,
     ReproducibilityCertificate,
     SeverityLevel,
 )
 from .scanner import heal_repository, readiness_score, scan_repository
+from .apt_healer import analyze_log_hybrid, heal_dockerfile, parse_compiler_log
 
 __all__ = [
     "AuditReport",
@@ -22,11 +24,15 @@ __all__ = [
     "DockerfilePatchResult",
     "FileHashNode",
     "HealResult",
+    "HybridAnalysisResult",
     "LandmineIssue",
     "ReproducibilityCertificate",
     "SeverityLevel",
     "heal_repository",
     "readiness_score",
     "scan_repository",
+    "analyze_log_hybrid",
+    "heal_dockerfile",
+    "parse_compiler_log",
     "__version__",
 ]

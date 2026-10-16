@@ -190,6 +190,28 @@ def test_staged_build_reports_blocked_without_docker(monkeypatch) -> None:
     assert "Docker" in body["detail"]
 
 
+def test_staged_build_output_redacts_common_secret_formats() -> None:
+    from worksonmymachine.app import _redact_build_output
+
+    assignment = "assignment-secret-123"
+    bearer = "bearer-secret-456"
+    provider = "sk-proj-provider-secret-abcdefghijklmnopqrstuvwxyz"
+    aws = "AKIAIOSFODNN7EXAMPLE"
+    jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyIn0.signature-secret"
+    pem = "-----BEGIN PRIVATE KEY-----\\nprivate-key-material\\n-----END PRIVATE KEY-----"
+    output = (
+        f"API_KEY={assignment} Authorization: Bearer {bearer} "
+        f"OPENAI_API_KEY={provider} AWS_ACCESS_KEY_ID={aws} JWT={jwt} {pem}"
+    )
+
+    redacted = _redact_build_output(output)
+
+    for secret in (assignment, bearer, provider, aws, jwt, "private-key-material"):
+        assert secret not in redacted
+    assert "API_KEY=[REDACTED]" in redacted
+    assert "[REDACTED PRIVATE KEY]" in redacted
+
+
 def test_workspace_config_loads_safe_defaults() -> None:
     configured = load_workspace_config(DEFAULT_WORKSPACE_CONFIG)
 

@@ -47,7 +47,53 @@ _SHELL_REFERENCE = re.compile(
     r"(?P<path>(?:/|\.\.?/)?[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*\.sh)"
 )
 
+# Build logs are evidence, not a safe place to preserve the original bytes.
+# Keep this redaction policy local and deterministic so parser/API callers get
+# the same treatment without depending on a network provider or a scanner.
+_SECRET_ASSIGNMENT = re.compile(
+    r"(?i)(\b(?:[a-z_][a-z0-9_.-]*(?:password|passwd|secret|token|api[_-]?key|"
+    r"access[_-]?key|private[_-]?key|credential|client[_-]?secret|access[_-]?token|"
+    r"refresh[_-]?token|id[_-]?token|signing[_-]?key)[a-z0-9_.-]*|password|passwd|"
+    r"secret|token|api[_-]?key|access[_-]?key|private[_-]?key|authorization|"
+    r"credential|client[_-]?secret|access[_-]?token|refresh[_-]?token|id[_-]?token|"
+    r"signing[_-]?key)\b\s*(?:=|:)(?:\s*bearer\s+)?)([^\s,;]+)"
+)
+_BEARER_TOKEN = re.compile(r"(?i)(\bbearer\s+)([^\s,;]+)")
+_PEM_PRIVATE_KEY = re.compile(
+    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----"
+)
+_KNOWN_PROVIDER_TOKEN = re.compile(
+    r"(?i)\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"
+    r"|\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b"
+    r"|\bxox[baprs]-[A-Za-z0-9-]{10,}\b"
+    r"|\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}\b"
+    r"|\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b"
+    r"|\bsk-ant-[A-Za-z0-9_-]{20,}\b"
+    r"|\bAIza[A-Za-z0-9_-]{30,}\b"
+    r"|\bnpm_[A-Za-z0-9]{30,}\b"
+    r"|\b(?:hf|r8|vercel)_[A-Za-z0-9_]{20,}\b"
+    r"|\bSG\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\b"
+    r"|\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"
+)
+_REDACTED_PRIVATE_KEY = "[REDACTED PRIVATE KEY]"
+_REDACTED_SECRET = "[REDACTED]"
+_TRUNCATION_MARKER = "\n...[truncated]"
+MAX_DIAGNOSTIC_OUTPUT = 12_000
+MAX_DIAGNOSTIC_LINE = 500
 
+
+def redact_sensitive_text(value: object, limit: int | None = None) -> str:
+    """Redact common credentials while retaining bounded diagnostic context."""
+
+    text = str(value or "")
+    text = _PEM_PRIVATE_KEY.sub(_REDACTED_PRIVATE_KEY, text)
+    text = _SECRET_ASSIGNMENT.sub(r"\1" + _REDACTED_SECRET, text)
+    text = _BEARER_TOKEN.sub(r"\1" + _REDACTED_SECRET, text)
+    text = _KNOWN_PROVIDER_TOKEN.sub(_REDACTED_SECRET, text)
+    if limit is not None and len(text) > limit:
+        marker = _TRUNCATION_MARKER
+        text = text[: max(0, limit - len(marker))] + marker
+    return text
 # ``apt_packages`` is retained as the stable, Debian-oriented vocabulary used
 # by the parser and existing API clients.  Dockerfile healing translates that
 # vocabulary only when the base image gives us a supported package ecosystem.
@@ -162,6 +208,12 @@ _PACKAGE_MAP: dict[str, dict[str, tuple[str, ...]]] = {
 }
 
 _DISTRO_TO_MANAGER = {"debian": "apt", "alpine": "apk", "fedora": "dnf"}
+
+
+def _redact_sensitive_output(value: object) -> str:
+    """Redact likely credentials before compiler evidence leaves this module."""
+
+    return redact_sensitive_text(value, MAX_DIAGNOSTIC_OUTPUT)
 
 
 @dataclass(frozen=True)
@@ -572,8 +624,10 @@ def _matched_line(log_text: str, pattern: re.Pattern[str]) -> tuple[str, int]:
 
     for number, line in enumerate(log_text.splitlines(), 1):
         if pattern.search(line):
-            return line.strip(), number
-    return log_text.strip().splitlines()[0][:500], 1
+            return redact_sensitive_text(line.strip(), MAX_DIAGNOSTIC_LINE), number
+    return redact_sensitive_text(
+        log_text.strip().splitlines()[0], MAX_DIAGNOSTIC_LINE
+    ), 1
 
 
 def parse_compiler_log(log_text: str) -> list[CompilerDiagnostic]:
@@ -582,6 +636,7 @@ def parse_compiler_log(log_text: str) -> list[CompilerDiagnostic]:
     text = str(log_text or "")
     if not text.strip():
         return []
+    safe_text = redact_sensitive_text(text, MAX_DIAGNOSTIC_OUTPUT)
     diagnostics: list[CompilerDiagnostic] = []
     for rule in _RULES:
         if not rule.pattern.search(text):
@@ -590,11 +645,11 @@ def parse_compiler_log(log_text: str) -> list[CompilerDiagnostic]:
         diagnostics.append(
             CompilerDiagnostic(
                 tool=rule.tool,
-                message=message or rule.explanation,
+                message=_redact_sensitive_output(message or rule.explanation),
                 severity=rule.severity,
                 line_number=line_number,
                 code=rule.signature,
-                raw_output=text,
+                raw_output=safe_text,
                 error_signature=message,
                 missing_artifact=rule.artifact,
                 recommended_apt_packages=list(rule.packages),
@@ -639,7 +694,7 @@ def _llm_analysis(log_text: str) -> tuple[bool, str | None, list[str]]:
             "Analyze this build log as optional context. Return JSON with only "
             "root_cause_summary (string) and apt_packages (array of Debian package "
             "names). Do not invent packages when the evidence is weak.\n\n"
-            + str(log_text or "")[:12000]
+            + redact_sensitive_text(log_text, MAX_DIAGNOSTIC_OUTPUT)
         )
         with httpx.Client(timeout=5.0) as client:
             response = client.post(
@@ -668,6 +723,8 @@ def _llm_analysis(log_text: str) -> tuple[bool, str | None, list[str]]:
         summary = parsed.get("root_cause_summary")
         if not isinstance(summary, str) or not summary.strip():
             summary = None
+        else:
+            summary = redact_sensitive_text(summary, MAX_DIAGNOSTIC_LINE)
         packages = _normalise_packages(parsed.get("apt_packages", []))
         return True, summary.strip() if summary else None, packages
     except Exception:

@@ -3,7 +3,6 @@
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
-import re
 import shutil
 import stat
 import subprocess
@@ -20,7 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from . import __version__
 from .config import PROJECT_ROOT, settings, workspace_config
-from .apt_healer import analyze_log_hybrid, heal_dockerfile
+from .apt_healer import analyze_log_hybrid, heal_dockerfile, redact_sensitive_text
 from .exports import (
     certificate_json,
     filter_issues,
@@ -47,6 +46,7 @@ from .repro_hash import (
     run_full_audit,
 )
 from .scanner import heal_repository, readiness_score, scan_repository
+from .signing import certificate_signature_status
 
 
 app = FastAPI(
@@ -84,6 +84,23 @@ class TargetRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     target: str = Field(min_length=1)
+
+
+class CertificateRequest(TargetRequest):
+    """Certificate request with opt-in offline signing controls."""
+
+    sign: bool = False
+    signing_key: str | None = Field(default=None, min_length=1, repr=False)
+    signature_key_id: str = Field(default="local", min_length=1, max_length=64)
+
+
+class VerifyCertificateRequest(BaseModel):
+    """Verify a certificate with caller-supplied key material."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    certificate: ReproducibilityCertificate
+    verification_key: str | None = Field(default=None, min_length=1, repr=False)
 
 
 class ScanResponse(BaseModel):
@@ -157,6 +174,9 @@ class AuditRequest(BaseModel):
     target: str = Field(min_length=1)
     auto_heal: bool = False
     new_only: bool = False
+    sign: bool = False
+    signing_key: str | None = Field(default=None, min_length=1, repr=False)
+    signature_key_id: str = Field(default="local", min_length=1, max_length=64)
 
 
 class BuildVerificationRequest(BaseModel):
@@ -629,14 +649,46 @@ def heal_dockerfile_endpoint(request: DockerfileHealRequest) -> DockerfilePatchR
 
 
 @app.post("/api/v1/certify", response_model=ReproducibilityCertificate)
-def certify(request: TargetRequest) -> ReproducibilityCertificate:
+def certify(request: CertificateRequest) -> ReproducibilityCertificate:
     """Generate a deterministic reproducibility certificate for a target."""
 
     try:
         target_path = _resolve_target(request.target)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return generate_certificate(target_path)
+    if request.signing_key is not None and not request.sign:
+        # Supplying key material is itself an explicit opt-in, so accepting it
+        # as an implicit sign request keeps clients concise without ever
+        # requiring a secret for the default unsigned route.
+        should_sign = True
+    else:
+        should_sign = request.sign
+    if should_sign and request.signing_key is None:
+        raise HTTPException(
+            status_code=400,
+            detail="sign=true requires an explicit signing_key",
+        )
+    try:
+        if not should_sign:
+            return generate_certificate(target_path)
+        return generate_certificate(
+            target_path,
+            signing_key=request.signing_key,
+            key_id=request.signature_key_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="certificate signing request is invalid") from exc
+
+
+@app.post("/api/v1/verify-certificate")
+def verify_certificate(request: VerifyCertificateRequest) -> dict[str, object]:
+    """Verify detached certificate evidence without returning key material."""
+
+    status = certificate_signature_status(
+        request.certificate,
+        request.verification_key,
+    )
+    return status
 
 
 @app.post("/api/v1/compare")
@@ -684,40 +736,16 @@ _BUILD_IGNORED_DIRECTORIES = (
     "dist",
     "node_modules",
 )
-_SECRET_OUTPUT = re.compile(
-    r"(?i)(\b(?:[a-z_][a-z0-9_.-]*(?:password|passwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key)[a-z0-9_.-]*|password|passwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|authorization)\b\s*(?:=|:)(?:\s*bearer\s+)?)([^\s,;]+)"
-)
-_BEARER_OUTPUT = re.compile(r"(?i)(\bbearer\s+)([^\s,;]+)")
-_PEM_OUTPUT = re.compile(
-    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----"
-)
-_KNOWN_TOKEN_OUTPUT = re.compile(
-    r"(?i)\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"
-    r"|\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b"
-    r"|\bxox[baprs]-[A-Za-z0-9-]{10,}\b"
-    r"|\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}\b"
-    r"|\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b"
-    r"|\bAIza[A-Za-z0-9_-]{30,}\b"
-    r"|\bnpm_[A-Za-z0-9]{30,}\b"
-    r"|\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"
-)
-
-
 def _redact_sensitive_text(value: object, limit: int = MAX_EXPLANATION_TEXT) -> str:
     """Redact common assignment and bearer-token values before API output."""
 
-    text = str(value or "")
-    text = _PEM_OUTPUT.sub("[REDACTED PRIVATE KEY]", text)
-    text = _SECRET_OUTPUT.sub(r"\1[REDACTED]", text)
-    text = _BEARER_OUTPUT.sub(r"\1[REDACTED]", text)
-    text = _KNOWN_TOKEN_OUTPUT.sub("[REDACTED]", text)
-    return text[:limit]
+    return redact_sensitive_text(value, limit)
 
 
 def _redact_build_output(value: str, limit: int = 12000) -> str:
     """Keep build receipts useful without persisting common secret values."""
 
-    redacted = _SECRET_OUTPUT.sub(r"\1[REDACTED]", value or "")
+    redacted = redact_sensitive_text(value or "")
     return redacted[-limit:]
 
 
@@ -741,10 +769,10 @@ def _verification_response(
         started_at=started_at,
         completed_at=completed_at,
         duration_seconds=max(0.0, (completed_at - started_at).total_seconds()),
-        command=command,
+        command=[_redact_sensitive_text(item, limit=2_000) for item in command],
         exit_code=exit_code,
         output=_redact_build_output(output),
-        detail=detail,
+        detail=_redact_sensitive_text(detail),
         auto_heal=auto_heal,
     )
 
@@ -1247,7 +1275,18 @@ def audit(request: AuditRequest) -> AuditReport:
 
     try:
         target_path = _resolve_target(request.target)
-        report = run_full_audit(target_path, auto_heal=request.auto_heal)
+        should_sign = request.signing_key is not None or request.sign
+        if should_sign and request.signing_key is None:
+            raise ValueError("sign=true requires an explicit signing_key")
+        if not should_sign:
+            report = run_full_audit(target_path, auto_heal=request.auto_heal)
+        else:
+            report = run_full_audit(
+                target_path,
+                auto_heal=request.auto_heal,
+                signing_key=request.signing_key,
+                key_id=request.signature_key_id,
+            )
         baseline_path = PROJECT_ROOT / workspace_config.baseline_file
         baseline = load_baseline(baseline_path) if request.new_only else set()
         effective, suppressed = filter_issues(

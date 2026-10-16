@@ -27,6 +27,8 @@ from typing import Any, Iterable, Sequence
 from .apt_healer import heal_dockerfile
 from .config import workspace_config
 from .models import HealResult, LandmineIssue, SeverityLevel
+from .profiles import RepositoryProfile, get_profile
+from .rules import get_rule_metadata
 
 
 _SOURCE_SUFFIXES = {".py", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}
@@ -266,8 +268,39 @@ def _issue(
 ) -> LandmineIssue:
     """Construct one validated issue while keeping paths target-relative."""
 
+    relative_path = _relative(root, path) if path is not None else None
+    # A shared issue ID such as IMPORT-CASE is emitted by both language
+    # scanners. Resolve its pack from the source suffix while retaining the
+    # established issue ID for baseline/API compatibility.
+    pack_name: str | None = None
+    if relative_path:
+        suffix = Path(relative_path).suffix.lower()
+        if suffix in _JS_SUFFIXES:
+            pack_name = "javascript-typescript"
+        elif suffix == ".sh":
+            pack_name = "shell"
+        elif suffix in {".py", ".toml"}:
+            pack_name = "python"
+        elif path is not None and path.name.lower().startswith("dockerfile"):
+            pack_name = "docker"
+    if issue_id.startswith("SECRET-") or issue_id.startswith("TARGET-"):
+        pack_name = "ci"
+    elif issue_id.startswith("DOCKER-"):
+        pack_name = "docker"
+    elif issue_id.startswith("SHELL-"):
+        pack_name = "shell"
+    elif issue_id.startswith("RUST-"):
+        pack_name = "rust-cargo"
+    elif issue_id.startswith(("PYPROJECT-", "REQ-", "PATH-")):
+        pack_name = pack_name or "python"
+    metadata = get_rule_metadata(issue_id, pack_name=pack_name)
+
     return LandmineIssue(
         issue_id=issue_id,
+        rule_id=metadata.rule_id,
+        rule_version=metadata.rule_version,
+        rule_pack=metadata.pack_name,
+        confidence=metadata.confidence,
         category=category,
         message=message,
         severity=severity,
@@ -275,6 +308,7 @@ def _issue(
         line_number=line_number,
         remediation=remediation,
         evidence=list(evidence),
+        fix_mode=metadata.fix_mode,
     )
 
 
@@ -1596,8 +1630,13 @@ def _docker_chmod_covers(reference: str, chmod_lines: Sequence[str]) -> bool:
     )
 
 
-def scan_repository(target_path: Path) -> list[LandmineIssue]:
+def scan_repository(
+    target_path: Path,
+    profile: str | RepositoryProfile | None = None,
+) -> list[LandmineIssue]:
     """Scan a repository without executing target code or changing its files."""
+
+    selected_profile = get_profile(profile or workspace_config.profile)
 
     target = Path(target_path)
     try:
@@ -1657,6 +1696,12 @@ def scan_repository(target_path: Path) -> list[LandmineIssue]:
     _scan_tracked_shell_modes(
         target, issues, {_relative(target, path) for path in files}
     )
+    if selected_profile.enabled_rule_packs:
+        issues = [
+            issue
+            for issue in issues
+            if issue.rule_pack is None or issue.rule_pack in selected_profile.enabled_rule_packs
+        ]
     return _sorted_issues(issues)
 
 

@@ -93,6 +93,81 @@ def test_dashboard_assets_are_ascii_offline_and_svg_driven() -> None:
     assert "URL.revokeObjectURL(link.href);" not in app_source
 
 
+def test_finding_register_has_large_set_controls_and_local_csv_export() -> None:
+    index = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
+    app_source = (STATIC_ROOT / "app.js").read_text(encoding="utf-8")
+    styles = (STATIC_ROOT / "styles.css").read_text(encoding="utf-8")
+
+    for control in [
+        'id="issue-sort"',
+        'value="severity"',
+        'value="path"',
+        'value="rule"',
+        'value="status"',
+        'id="issue-sort-direction"',
+        'id="issue-select-all"',
+        'id="issue-clear-selection"',
+        'id="issue-export-csv"',
+        'id="issue-selection-count"',
+        'id="issue-results-meta"',
+    ]:
+        assert control in index
+
+    for marker in [
+        "loadFindingFilters",
+        "persistFindingFilters",
+        "sortIssueEntries",
+        "issuePageSize",
+        "data-issue-page",
+        "data-issue-selection",
+        "findingsCsv",
+        "text/csv;charset=utf-8",
+        "downloadFindingsCsv",
+    ]:
+        assert marker in app_source
+    assert 'window.localStorage.setItem(findingFilterStorageKey' in app_source
+    assert 'request("/api/v1/' not in app_source[app_source.index("function downloadFindingsCsv"):app_source.index("function clientSarif")]
+    assert ".issue-pagination" in styles
+    assert ".issue-row-select" in styles
+
+
+def test_dashboard_routes_and_run_history_workspace_are_local_and_addressable() -> None:
+    index = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
+    app_source = (STATIC_ROOT / "app.js").read_text(encoding="utf-8")
+    styles = (STATIC_ROOT / "styles.css").read_text(encoding="utf-8")
+
+    for view in ["dashboard", "bugs", "dependency", "security"]:
+        assert 'data-page-view="' + view + '"' in index
+        assert 'data-view="' + view + '"' in index
+    assert 'data-view="history"' in index
+    assert 'data-page-view="history"' in index
+    for element_id in [
+        "run-history-list",
+        "history-comparison",
+        "history-run-count",
+        "history-latest-target",
+        "history-latest-time",
+    ]:
+        assert 'id="' + element_id + '"' in index
+
+    for marker in [
+        "URLSearchParams",
+        "window.location.hash",
+        "hashchange",
+        "popstate",
+        "syncRoute",
+        "timestamp:",
+        "findings:",
+        "certificate:",
+        "changed_files:",
+        "artifacts:",
+        "data-history-artifact",
+    ]:
+        assert marker in app_source
+    assert ".history-workspace" in styles
+    assert ".history-run-card" in styles
+
+
 def test_all_demo_targets_complete_scan_parse_docker_and_autoheal_workflow() -> None:
     client = TestClient(app)
     targets = [

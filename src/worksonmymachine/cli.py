@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import re
 
@@ -24,6 +25,7 @@ from .exports import (
 )
 from .models import LandmineIssue, ReproducibilityCertificate
 from .repro_hash import generate_certificate, run_full_audit
+from .signing import certificate_signature_status
 from .scanner import (
     HealingConflictError,
     apply_healing,
@@ -259,6 +261,26 @@ def _write_or_echo(payload: str, output: str | None) -> None:
         click.echo(payload, nl=not payload.endswith("\n"))
 
 
+def _load_signing_key(
+    value: str | None,
+    key_file: str | Path | None,
+) -> str | bytes | None:
+    """Load explicitly requested signing material without ever printing it."""
+
+    if value and key_file:
+        raise click.UsageError("use --signing-key or --signing-key-file, not both")
+    if key_file:
+        path = Path(key_file)
+        try:
+            key = path.read_bytes()
+        except OSError as exc:
+            raise click.ClickException("could not read signing key file") from exc
+        if not key:
+            raise click.ClickException("signing key file is empty")
+        return key
+    return value
+
+
 def _run_audit_command(
     target: str,
     auto_heal: bool,
@@ -273,6 +295,9 @@ def _run_audit_command(
     workspace_root: str | Path | None = None,
     apply: bool = False,
     yes: bool = False,
+    signing_key: str | bytes | None = None,
+    signing_key_file: str | Path | None = None,
+    signature_key_id: str = "local",
 ) -> None:
     if apply and not auto_heal:
         raise click.UsageError("--auto-heal is required when using --apply")
@@ -280,7 +305,13 @@ def _run_audit_command(
         raise click.UsageError("--yes is only valid together with --apply")
 
     target_path = _resolve_target(target, workspace_root)
-    report = run_full_audit(target_path, auto_heal=auto_heal)
+    key = _load_signing_key(signing_key, signing_key_file)
+    report = run_full_audit(
+        target_path,
+        auto_heal=auto_heal,
+        signing_key=key,
+        key_id=signature_key_id,
+    )
     applied_result = None
     if apply:
         _confirm_apply(yes)
@@ -373,6 +404,9 @@ def main() -> None:
 @click.option("--baseline", type=click.Path(dir_okay=False), help="Baseline JSON path.")
 @click.option("--write-baseline", is_flag=True, help="Write the current raw findings as the baseline.")
 @click.option("--require-reproducible", is_flag=True, help="Fail when the CleanRoom certificate is not reproducible.")
+@click.option("--signing-key", help="Explicit HMAC signing key; omitted by default.",)
+@click.option("--signing-key-file", type=click.Path(dir_okay=False), help="Read the explicit signing key from a file.")
+@click.option("--signature-key-id", default="local", show_default=True, help="Public identifier stored with a signature.")
 def audit_command(
     target: str | None,
     auto_heal: bool,
@@ -387,6 +421,9 @@ def audit_command(
     baseline: str | None,
     write_baseline: bool,
     require_reproducible: bool,
+    signing_key: str | None,
+    signing_key_file: str | None,
+    signature_key_id: str,
 ) -> None:
     """Run a CI-friendly audit for TARGET or the configured workspace target."""
 
@@ -404,6 +441,9 @@ def audit_command(
         workspace_root,
         apply,
         yes,
+        signing_key,
+        signing_key_file,
+        signature_key_id,
     )
 
 
@@ -425,6 +465,9 @@ def audit_command(
 @click.option("--baseline", type=click.Path(dir_okay=False))
 @click.option("--write-baseline", is_flag=True)
 @click.option("--require-reproducible", is_flag=True)
+@click.option("--signing-key", help="Explicit HMAC signing key; omitted by default.")
+@click.option("--signing-key-file", type=click.Path(dir_okay=False), help="Read the explicit signing key from a file.")
+@click.option("--signature-key-id", default="local", show_default=True, help="Public identifier stored with a signature.")
 def check_command(
     target: str | None,
     auto_heal: bool,
@@ -437,6 +480,9 @@ def check_command(
     baseline: str | None,
     write_baseline: bool,
     require_reproducible: bool,
+    signing_key: str | None,
+    signing_key_file: str | None,
+    signature_key_id: str,
 ) -> None:
     """Run a CI check with the same policy and artifact formats as audit."""
 
@@ -452,6 +498,11 @@ def check_command(
         write_baseline,
         require_reproducible,
         workspace_root,
+        False,
+        False,
+        signing_key,
+        signing_key_file,
+        signature_key_id,
     )
 
 
@@ -626,6 +677,14 @@ def _print_certificate(
         ("Linux readiness score", f"{certificate.linux_readiness_score:.2f}/100"),
         ("Dockerfile hardened", str(certificate.dockerfile_hardened)),
         ("Verification hash", certificate.verification_hash),
+        (
+            "Signature",
+            certificate.signature.algorithm if certificate.signature else "unsigned",
+        ),
+        (
+            "Signature key ID",
+            certificate.signature.key_id if certificate.signature else "-",
+        ),
         ("Issues", str(len(certificate.issues))),
     )
     for label, value in fields:
@@ -644,21 +703,68 @@ def _print_certificate(
 )
 @click.option("--json", "as_json", is_flag=True, help="Emit the certificate as JSON.")
 @click.option("--output", type=click.Path(dir_okay=False), help="Write the certificate JSON to a file.")
+@click.option("--signing-key", help="Explicit HMAC signing key; omitted by default.")
+@click.option("--signing-key-file", type=click.Path(dir_okay=False), help="Read the explicit signing key from a file.")
+@click.option("--signature-key-id", default="local", show_default=True, help="Public identifier stored with a signature.")
 def certify(
     target: str | None,
     workspace_root: Path | None,
     as_json: bool,
     output: str | None,
+    signing_key: str | None,
+    signing_key_file: str | None,
+    signature_key_id: str,
 ) -> None:
     """Generate a reproducibility certificate for TARGET."""
 
-    certificate = generate_certificate(
-        _resolve_target(target or _default_target(workspace_root), workspace_root)
-    )
+    key = _load_signing_key(signing_key, signing_key_file)
+    try:
+        target_path = _resolve_target(target or _default_target(workspace_root), workspace_root)
+        if key is None:
+            certificate = generate_certificate(target_path)
+        else:
+            certificate = generate_certificate(
+                target_path,
+                signing_key=key,
+                key_id=signature_key_id,
+            )
+    except ValueError as exc:
+        raise click.ClickException("certificate signing request is invalid") from exc
     if as_json or output:
         _write_or_echo(certificate.model_dump_json(indent=2) + "\n", output)
         return
     _print_certificate(_console(), certificate)
+
+
+@main.command("verify-certificate")
+@click.argument("certificate_file", type=click.Path(exists=True, dir_okay=False))
+@click.option("--verification-key", help="Explicit HMAC verification key.")
+@click.option("--verification-key-file", type=click.Path(dir_okay=False), help="Read the verification key from a file.")
+@click.option("--json", "as_json", is_flag=True, help="Emit a machine-readable status object.")
+def verify_certificate(
+    certificate_file: str,
+    verification_key: str | None,
+    verification_key_file: str | None,
+    as_json: bool,
+) -> None:
+    """Verify a signed certificate without printing key material."""
+
+    key = _load_signing_key(verification_key, verification_key_file)
+    try:
+        certificate = ReproducibilityCertificate.model_validate_json(
+            Path(certificate_file).read_text(encoding="utf-8")
+        )
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise click.ClickException("certificate file is invalid") from exc
+    status = certificate_signature_status(certificate, key)
+    if as_json:
+        click.echo(json.dumps(status, sort_keys=True))
+    else:
+        click.echo(
+            "valid" if status["valid"] else ("unsigned" if not status["signed"] else "invalid")
+        )
+    if status["signed"] and not status["valid"]:
+        raise click.exceptions.Exit(1)
 
 
 @main.command("heal")

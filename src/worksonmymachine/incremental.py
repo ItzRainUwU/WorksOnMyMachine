@@ -31,7 +31,9 @@ from .models import LandmineIssue
 # rule pack must bump the corresponding value so old per-file results cannot be
 # reused accidentally.
 SCANNER_VERSION = "scanner-1"
-RULE_SET_VERSION = "rules-1"
+# Incremental entries created before secret scanning was included are
+# incomplete and must not be reused.
+RULE_SET_VERSION = "rules-2"
 CACHE_FORMAT_VERSION = 1
 
 
@@ -324,6 +326,7 @@ def _scan_file(target: Path, path: Path) -> list[LandmineIssue]:
         scanner._scan_requirements(target, path, issues)
     if path.name.lower() == "dockerfile" or path.name.lower().startswith("dockerfile."):
         scanner._scan_dockerfile(target, path, issues)
+    scanner._scan_secrets(target, path, issues)
     return issues
 
 
@@ -335,6 +338,43 @@ def _issues_from_entry(value: dict[str, Any]) -> list[LandmineIssue] | None:
         return [LandmineIssue.model_validate(issue) for issue in validated["issues"]]
     except (TypeError, ValueError):
         return None
+
+
+def _unsafe_target_issue(
+    target: Path, *, traverses_link: bool
+) -> list[LandmineIssue]:
+    """Return the normal scanner's root-safety finding without snapshotting.
+
+    The regular scanner uses ``file_path=None`` for a target-level finding. The
+    current model validator rejects that optional value, so ``model_construct``
+    preserves the scanner's declared output shape until that unrelated model
+    issue is corrected.
+    """
+
+    metadata = scanner.get_rule_metadata(
+        "TARGET-REPARSE-POINT", pack_name="ci"
+    )
+    return [
+        LandmineIssue.model_construct(
+            issue_id="TARGET-REPARSE-POINT",
+            rule_id=metadata.rule_id,
+            rule_version=metadata.rule_version,
+            rule_pack=metadata.pack_name,
+            confidence=metadata.confidence,
+            category="input",
+            message=(
+                "Scanner target path traverses a symlink, junction, or reparse point."
+                if traverses_link
+                else "Scanner target must not be a symlink, junction, or reparse point."
+            ),
+            severity=scanner.SeverityLevel.CRITICAL,
+            file_path=None,
+            line_number=None,
+            remediation=None,
+            evidence=[],
+            fix_mode=metadata.fix_mode,
+        )
+    ]
 
 
 def scan_repository_incremental(
@@ -354,6 +394,15 @@ def scan_repository_incremental(
     """
 
     target = Path(target_path)
+    # Match the regular scanner's input contract before touching the directory
+    # or creating a snapshot.  In particular, a symlink/junction/reparse-point
+    # root may otherwise be followed by ``iterdir`` and scan outside the target.
+    try:
+        scanner._ensure_no_link_components(target.parent)
+    except scanner.HealingConflictError:
+        return scanner.scan_repository(target)
+    if scanner._is_link_like(target):
+        return scanner.scan_repository(target)
     if not target.is_dir():
         return scanner.scan_repository(target)
     if not isinstance(scanner_version, str) or not isinstance(

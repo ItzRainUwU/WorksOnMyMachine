@@ -9,7 +9,9 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer
+
+from .rules import FixMode
 
 
 class SeverityLevel(StrEnum):
@@ -21,9 +23,11 @@ class SeverityLevel(StrEnum):
     CRITICAL = "critical"
 
 
-def _relative_posix_path(value: str) -> str:
+def _relative_posix_path(value: str | None) -> str | None:
     """Validate a project-relative POSIX path without touching the filesystem."""
 
+    if value is None:
+        return None
     normalized = value.strip()
     if not normalized:
         raise ValueError("path must not be empty")
@@ -46,6 +50,13 @@ class LandmineIssue(_StrictModel):
     """A portability, dependency, or environment assumption found in a target."""
 
     issue_id: str = Field(min_length=1)
+    # Additive rule metadata.  Optional defaults preserve construction by
+    # integrations written against the original issue contract; scanner output
+    # always populates these fields.
+    rule_id: str | None = Field(default=None, min_length=1)
+    rule_version: str | None = Field(default=None, min_length=1)
+    rule_pack: str | None = Field(default=None, min_length=1)
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     category: str = Field(min_length=1)
     message: str = Field(min_length=1)
     severity: SeverityLevel
@@ -53,6 +64,24 @@ class LandmineIssue(_StrictModel):
     line_number: int | None = Field(default=None, ge=1)
     remediation: str | None = None
     evidence: list[str] = Field(default_factory=list)
+    fix_mode: FixMode | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize_legacy_compatibility(self, handler: Any) -> Any:
+        """Omit unset metadata so legacy hand-built issue JSON stays stable."""
+
+        payload = handler(self)
+        if isinstance(payload, dict):
+            for field_name in (
+                "rule_id",
+                "rule_version",
+                "rule_pack",
+                "confidence",
+                "fix_mode",
+            ):
+                if getattr(self, field_name) is None:
+                    payload.pop(field_name, None)
+        return payload
 
     _validate_file_path = field_validator("file_path")(_relative_posix_path)
 
@@ -187,6 +216,19 @@ class FileHashNode(_StrictModel):
     _validate_path = field_validator("path")(_relative_posix_path)
 
 
+class CertificateSignature(_StrictModel):
+    """Detached certificate signature metadata.
+
+    The signing key is intentionally not a model field.  ``value`` is an
+    encoded signature and is safe to publish; verification keys remain with
+    the caller that explicitly requests verification.
+    """
+
+    algorithm: str = Field(min_length=1)
+    key_id: str = Field(default="local", min_length=1)
+    value: str = Field(min_length=1)
+
+
 class ReproducibilityCertificate(_StrictModel):
     """Signed-ready evidence that a target was checked deterministically."""
 
@@ -207,6 +249,28 @@ class ReproducibilityCertificate(_StrictModel):
     dockerfile_hardened: bool = False
     verification_hash: str = ""
     is_cleanroom_certified: bool = False
+    signature: CertificateSignature | None = None
+
+    @property
+    def is_signed(self) -> bool:
+        """Return whether this certificate carries detached signature data."""
+
+        return self.signature is not None
+
+    @model_serializer(mode="wrap")
+    def _serialize_unsigned_compatibility(self, handler: Any) -> Any:
+        """Keep legacy unsigned JSON byte-compatible while exposing signatures.
+
+        The optional field is present in the Pydantic/OpenAPI schema, but an
+        unsigned certificate omits it from serialized payloads.  This keeps
+        existing certificate exports and consumers compatible while signed
+        certificates gain the additive ``signature`` object.
+        """
+
+        payload = handler(self)
+        if self.signature is None and isinstance(payload, dict):
+            payload.pop("signature", None)
+        return payload
 
     @property
     def merkle_root(self) -> str:

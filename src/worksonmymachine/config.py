@@ -5,6 +5,10 @@ import os
 from pathlib import Path
 import tomllib
 from collections.abc import Mapping
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .profiles import RepositoryProfile
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
@@ -87,6 +91,35 @@ class WorkspaceConfig:
     baseline_file: str = ".worksonmymachine-baseline.json"
     suppressions: tuple["SuppressionRule", ...] = ()
     policy: Policy = field(default_factory=Policy)
+    profile: str = "generic"
+
+    def __post_init__(self) -> None:
+        """Validate profile selection and apply its defaults when appropriate."""
+
+        from .profiles import get_profile
+
+        selected = get_profile(self.profile)
+        object.__setattr__(self, "profile", selected.name)
+        if not isinstance(self.policy, Policy):
+            raise ValueError("workspace policy must be a Policy")
+        # A direct ``WorkspaceConfig(profile=...)`` should behave like a TOML
+        # profile selection. Explicit non-default policy values remain intact.
+        if self.policy == Policy() and selected.policy != Policy():
+            object.__setattr__(self, "policy", selected.policy)
+
+    @property
+    def repository_profile(self) -> "RepositoryProfile":
+        """Return the validated profile definition selected by this config."""
+
+        from .profiles import get_profile
+
+        return get_profile(self.profile)
+
+    @property
+    def expectations(self) -> tuple[str, ...]:
+        """Expose profile expectations alongside the existing config fields."""
+
+        return self.repository_profile.expectations
 
 
 @dataclass(frozen=True)
@@ -208,7 +241,7 @@ def _load_suppressions(value: object) -> tuple[SuppressionRule, ...]:
     return tuple(rules)
 
 
-def policy_from_mapping(value: object) -> Policy:
+def policy_from_mapping(value: object, *, defaults: Policy | None = None) -> Policy:
     """Validate and construct a policy from a TOML mapping.
 
     This small boundary helper is intentionally public so integrations can
@@ -216,8 +249,9 @@ def policy_from_mapping(value: object) -> Policy:
     exact workspace validation rules.
     """
 
+    base = defaults or Policy()
     if value is None:
-        return Policy()
+        return base
     if not isinstance(value, Mapping):
         raise ValueError("policy must be a TOML table")
     unknown = sorted(set(value) - _POLICY_FIELDS)
@@ -226,11 +260,13 @@ def policy_from_mapping(value: object) -> Policy:
         raise ValueError(f"policy contains unsupported field(s): {names}")
     try:
         return Policy(
-            fail_on=value.get("fail_on", "high"),
-            min_readiness=value.get("min_readiness", 95.0),
-            require_reproducible=value.get("require_reproducible", True),
-            allow_floating_docker_tags=value.get("allow_floating_docker_tags", False),
-            require_lockfiles=value.get("require_lockfiles", True),
+            fail_on=value.get("fail_on", base.fail_on),
+            min_readiness=value.get("min_readiness", base.min_readiness),
+            require_reproducible=value.get("require_reproducible", base.require_reproducible),
+            allow_floating_docker_tags=value.get(
+                "allow_floating_docker_tags", base.allow_floating_docker_tags
+            ),
+            require_lockfiles=value.get("require_lockfiles", base.require_lockfiles),
         )
     except (TypeError, ValueError) as exc:
         raise ValueError(f"invalid workspace policy: {exc}") from exc
@@ -254,6 +290,9 @@ def load_workspace_config(path: Path | None = None) -> WorkspaceConfig:
         raise ValueError(f"workspace config is invalid: {exc}") from exc
     if not isinstance(parsed, dict):
         raise ValueError("workspace config must contain a TOML table")
+    from .profiles import profile_from_mapping
+
+    selected_profile = profile_from_mapping(parsed.get("profile"))
     return WorkspaceConfig(
         target_paths=_safe_relative_list(parsed.get("target_paths", ["workspace"]), "target_paths"),
         ignore_paths=_safe_relative_list(parsed.get("ignore_paths", []), "ignore_paths"),
@@ -266,7 +305,8 @@ def load_workspace_config(path: Path | None = None) -> WorkspaceConfig:
             "baseline_file",
         ),
         suppressions=_load_suppressions(parsed.get("suppressions")),
-        policy=policy_from_mapping(parsed.get("policy")),
+        policy=policy_from_mapping(parsed.get("policy"), defaults=selected_profile.policy),
+        profile=selected_profile.name,
     )
 
 

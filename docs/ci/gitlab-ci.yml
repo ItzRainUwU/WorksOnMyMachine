@@ -1,0 +1,25 @@
+# Copy to .gitlab-ci.yml.  The image tag matches .python-version.
+image: python:3.11.9-slim
+
+stages:
+  - test
+
+variables:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PIP_NO_INPUT: "1"
+
+cache:
+  key:
+    files:
+      - requirements.lock
+  paths:
+    - .venv/
+
+test:
+  stage: test
+  before_script:
+    - python -m venv .venv
+    - .venv/bin/python -m pip install --requirement requirements.txt --constraint requirements.lock
+  script:
+    # No network or package-manager command is used by the test step.
+    - .venv/bin/python -m pytest

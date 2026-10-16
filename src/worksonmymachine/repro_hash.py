@@ -31,6 +31,7 @@ from .models import (
     SeverityLevel,
 )
 from .scanner import heal_repository, readiness_score, scan_repository
+from .signing import CertificateSigner, sign_certificate
 
 
 _EXCLUDED_DIRECTORIES = frozenset(
@@ -1149,7 +1150,13 @@ def _verification_hash(
     return hashlib.sha256(encoded).hexdigest()
 
 
-def generate_certificate(target_path: Path) -> ReproducibilityCertificate:
+def generate_certificate(
+    target_path: Path,
+    *,
+    signing_key: str | bytes | bytearray | memoryview | None = None,
+    signer: CertificateSigner | None = None,
+    key_id: str = "local",
+) -> ReproducibilityCertificate:
     """Generate deterministic evidence for a target without changing it."""
 
     target = Path(target_path)
@@ -1178,7 +1185,7 @@ def generate_certificate(target_path: Path) -> ReproducibilityCertificate:
         and hardened
         and not blocking_issue
     )
-    return ReproducibilityCertificate(
+    certificate = ReproducibilityCertificate(
         certificate_id=f"cert-{verification_hash[:16]}",
         root_hash=root_hash,
         runtime=_runtime_for(target, nodes),
@@ -1191,6 +1198,12 @@ def generate_certificate(target_path: Path) -> ReproducibilityCertificate:
         dockerfile_hardened=hardened,
         verification_hash=verification_hash,
         is_cleanroom_certified=certified,
+    )
+    return sign_certificate(
+        certificate,
+        signing_key=signing_key,
+        signer=signer,
+        key_id=key_id,
     )
 
 
@@ -1364,13 +1377,25 @@ def _timeline(
     return events
 
 
-def run_full_audit(target_path: Path, auto_heal: bool = False) -> AuditReport:
+def run_full_audit(
+    target_path: Path,
+    auto_heal: bool = False,
+    *,
+    signing_key: str | bytes | bytearray | memoryview | None = None,
+    signer: CertificateSigner | None = None,
+    key_id: str = "local",
+) -> AuditReport:
     """Run a complete audit, healing only a temporary copy when requested."""
 
     target = Path(target_path)
     if not target.is_dir():
         raise ValueError("target_path must be a directory")
-    before = generate_certificate(target)
+    before = generate_certificate(
+        target,
+        signing_key=signing_key,
+        signer=signer,
+        key_id=key_id,
+    )
     diagnostics = _compiler_diagnostics(target)
     after: ReproducibilityCertificate | None = None
     heal_result: Any = None
@@ -1383,7 +1408,12 @@ def run_full_audit(target_path: Path, auto_heal: bool = False) -> AuditReport:
         staged = staging_parent / "target"
         try:
             heal_result = heal_repository(target, staged)
-            after = generate_certificate(staged)
+            after = generate_certificate(
+                staged,
+                signing_key=signing_key,
+                signer=signer,
+                key_id=key_id,
+            )
             post_heal_summary = _post_heal_summary(before, after, heal_result)
             dependency_data = dependency_telemetry(staged)
             diffs = list(heal_result.unified_diffs)
@@ -1430,4 +1460,5 @@ __all__ = [
     "compute_merkle_root",
     "generate_certificate",
     "run_full_audit",
+    "sign_certificate",
 ]

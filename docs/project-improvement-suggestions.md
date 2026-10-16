@@ -94,7 +94,7 @@ changing the default full-scan behavior.
 
 ## Product and Architecture
 
-### 4. Add rule packs
+### 4. [DONE] Add rule packs
 
 Move portability checks into independently versioned rule packs, such as:
 
@@ -109,6 +109,11 @@ Move portability checks into independently versioned rule packs, such as:
 
 Every finding should include a rule ID, rule version, confidence, evidence,  
 remediation, and whether the fix is automatic, staged, or manual.
+
+**Completed 2026-10-16:** Versioned local rule packs and metadata are available
+for Python, Docker, JavaScript/TypeScript, Rust/Cargo, Shell, and CI findings.
+Repository profiles can enable relevant packs and expectations without changing
+the default scanner behavior.
 
 ### 5. [DONE] Add “Explain this finding” details
 
@@ -127,7 +132,7 @@ bounded source context, rule/category/severity, detection rationale,
 cross-platform scenario, redacted evidence, remediation, fixed/open status,
 and post-heal after-scan verification.
 
-### 6. Add repository profiles
+### 6. [DONE] Add repository profiles
 
 Provide profiles such as:
 
@@ -142,9 +147,13 @@ Profiles could configure expected runtimes, required lockfiles, allowed base
 images, severity thresholds, ignored directories, build commands, and  
 certification policy.
 
+**Completed 2026-10-16:** Validated profiles now cover Python services, Rust
+native extensions, Node applications, monorepos, Docker-only projects, and CI
+validation, with profile-aware expectations and policy defaults.
+
 ## Dashboard and User Experience
 
-### 7. Add URL-based navigation
+### 7. [DONE] Add URL-based navigation
 
 Use URL fragments or query parameters for workspace navigation:
 
@@ -158,7 +167,11 @@ Use URL fragments or query parameters for workspace navigation:
 This enables browser back/forward navigation, bookmarks, reload persistence,  
 and links directly to an issue or workspace.
 
-### 8. Add a dedicated Run History workspace
+**Completed 2026-10-16:** Dashboard hash/query routes support workspace views,
+reload persistence, browser back/forward navigation, and deep links to issues
+and historical runs.
+
+### 8. [DONE] Add a dedicated Run History workspace
 
 Expand report history with:
 
@@ -172,17 +185,29 @@ Expand report history with:
 - Downloadable artifacts
 - Comparison between historical runs
 
-### 9. Improve large finding sets
+**Completed 2026-10-16:** A local Run History workspace now records timestamp,
+target, readiness, findings, certificate status, changed files, downloadable
+artifacts, and historical comparisons while preserving the existing storage key.
+
+### 9. [DONE] Improve large finding sets
 
 Add pagination or virtual scrolling, sorting by severity/path/rule/status,  
 multi-select findings, bulk suppression with a required reason, saved filters,  
 and CSV export for filtered results.
 
-### 10. Expand accessibility support
+**Completed 2026-10-16:** The dashboard now supports bounded pagination,
+severity/path/rule/status sorting, persisted filters, multi-select, and local
+CSV export for filtered findings.
+
+### 10. [DONE] Expand accessibility support
 
 Add full keyboard navigation, visible focus states, dialog focus trapping,  
 screen-reader announcements for scan progress, reduced-motion support,  
 contrast checks, and accessible textual descriptions for the dependency graph.
+
+**Completed 2026-10-16:** Added skip navigation, visible focus states, keyboard
+dialog handling, live announcements, reduced-motion and forced-colors support,
+and graph text alternatives.
 
 ## Security and Trust
 
@@ -204,11 +229,16 @@ assignments, provider tokens, PEM markers, cloud credentials, passwords, and
 committed `.env`-style files while redacting evidence and suppressing
 placeholders, documentation examples, lookups, and safe templates.
 
-### 12. Add signed certificates
+### 12. [DONE] Add signed certificates
 
 Build on the Merkle certificate with optional Ed25519, Sigstore, or Cosign  
 signatures so certificates can be independently verified in CI or on another  
 machine.
+
+**Completed 2026-10-16:** Certificates support explicit opt-in detached
+HMAC-SHA256 signing and fail-closed verification through library, API, CLI, and
+export paths. Keys are never stored in certificate output. See
+`docs/certificate-signing.md`.
 
 ### 13. [DONE] Harden the staged-copy boundary
 
@@ -233,10 +263,14 @@ checks, and a default “new findings only” mode.
 annotations and a concise `GITHUB_STEP_SUMMARY`, with opt-out inputs and the
 existing report outputs preserved.
 
-### 15. Add more CI templates
+### 15. [DONE] Add more CI templates
 
 Provide ready-to-copy examples for GitLab CI, Azure Pipelines, Jenkins,  
 Buildkite, and generic shell-based CI.
+
+**Completed 2026-10-16:** Ready-to-copy GitLab, Azure Pipelines, Jenkins,
+Buildkite, and generic shell templates are available under `docs/ci/`, using
+pinned Python, locked dependencies, and offline tests.
 
 ### 16. [DONE] Add a shared machine-readable policy file
 
@@ -292,13 +326,9 @@ targets. This will prevent accidental output-format drift.
 fixtures now protect representative serialized outputs with normalization only
 for generated timestamps.
 
-## Recommended Next Three
+## Roadmap status
 
-If only three improvements are implemented next, prioritize:
-
-1. Runtime-aware Docker base-image policies
-2. Explicit post-heal verification and remaining-finding explanations
-3. Incremental scan caching using the existing Merkle hashes
-
-Together, these improve correctness, user trust, and performance without  
-requiring a major architectural rewrite.
+All 19 improvements in this document are now marked `[DONE]`. Future work can
+extend these foundations with additional rule packs, signing adapters,
+profiles, CI providers, and dashboard refinements without reopening the core
+contracts delivered here.

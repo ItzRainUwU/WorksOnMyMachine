@@ -1,5 +1,7 @@
 """Focused coverage for incremental scanning and its cache contract."""
 
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -166,3 +168,79 @@ def test_external_symlink_is_not_scanned_or_cached(tmp_path: Path) -> None:
 
     assert incremental.scan_repository_incremental(target, cache) == []
     assert "external.py" not in cache.entries
+
+
+def test_incremental_scan_includes_secret_findings_like_full_scan(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    api_key = "sk-" + "a" * 32
+    (target / "settings.py").write_text(
+        f"OPENAI_API_KEY = {api_key!r}\n",
+        encoding="utf-8",
+    )
+    cache = incremental.IncrementalScanCache()
+
+    expected = scan_repository(target)
+    actual = incremental.scan_repository_incremental(target, cache)
+
+    assert actual == expected
+    assert [issue.issue_id for issue in actual] == ["SECRET-API-KEY"]
+    assert cache.entries["settings.py"]["issues"]
+
+
+def test_incremental_rejects_a_symlink_root_before_snapshotting(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "outside.py").write_text(
+        "OPENAI_API_KEY = '" + "a" * 32 + "'\n", encoding="utf-8"
+    )
+    target = tmp_path / "linked-target"
+    try:
+        target.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlink creation is unavailable on this platform")
+
+    cache = incremental.IncrementalScanCache()
+    expected = scan_repository(target)
+    actual = incremental.scan_repository_incremental(target, cache)
+
+    assert actual == expected
+    assert [issue.issue_id for issue in actual] == ["TARGET-REPARSE-POINT"]
+    assert cache.entries == {}
+
+
+def test_incremental_rejects_a_windows_junction_root_before_snapshotting(
+    tmp_path: Path,
+) -> None:
+    if os.name != "nt":
+        pytest.skip("Windows junction primitives are unavailable on this platform")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "outside.py").write_text(
+        "OPENAI_API_KEY = '" + "a" * 32 + "'\n", encoding="utf-8"
+    )
+    target = tmp_path / "junction-target"
+    created = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(target), str(outside)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if created.returncode != 0:
+        pytest.skip("Windows junction creation is unavailable on this host")
+
+    try:
+        cache = incremental.IncrementalScanCache()
+        expected = scan_repository(target)
+        actual = incremental.scan_repository_incremental(target, cache)
+
+        assert actual == expected
+        assert [issue.issue_id for issue in actual] == ["TARGET-REPARSE-POINT"]
+        assert cache.entries == {}
+    finally:
+        subprocess.run(
+            ["cmd", "/c", "rmdir", str(target)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )

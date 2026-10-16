@@ -1,0 +1,11 @@
+# Copy to .buildkite/pipeline.yml.  The agent must provide Python 3.11.9.
+steps:
+  - label: ":python: locked tests"
+    commands:
+      - "test \"$(cat .python-version)\" = \"3.11.9\""
+      - "python3.11 -m venv .venv"
+      - ".venv/bin/python -m pip install --requirement requirements.txt --constraint requirements.lock"
+      # The test command is offline after the locked environment is installed.
+      - ".venv/bin/python -m pytest"
+    agents:
+      os: "linux"

@@ -15,9 +15,17 @@
     auditWasAutoHealed: false,
     issueFilter: "all",
     issueSearch: "",
+    issueSortKey: "severity",
+    issueSortDirection: "desc",
+    issuePage: 1,
+    issuePageSize: 25,
+    selectedIssueKeys: {},
     selectedHealedFilePath: null,
     issueDetailRequestId: 0,
     activeView: "dashboard",
+    pendingRoute: null,
+    drawerReturnFocus: null,
+    popoverReturnFocus: null,
     events: [{ message: "clean room ready", level: "success", time: new Date() }],
     busy: false,
     toastTimer: null,
@@ -37,6 +45,9 @@
     rust: "error: Cargo, the Rust package manager, is not installed\nfatal error: openssl/ssl.h: No such file or directory",
     mysql: "mysql_config not found\ncmake: command not found",
   };
+
+  var findingFilterStorageKey = "worksonmymachine.findingFilters";
+  var findingSortKeys = ["severity", "path", "rule", "status"];
 
   function byId(id) {
     return document.getElementById(id);
@@ -91,6 +102,20 @@
     if (element) element.textContent = String(value == null ? "" : value);
   }
 
+  function announceScan(message) {
+    var announcer = byId("scan-announcer");
+    if (announcer) announcer.textContent = String(message || "");
+  }
+
+  function focusableElements(container) {
+    if (!container) return [];
+    return Array.prototype.slice.call(container.querySelectorAll("a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex=\"-1\"])"));
+  }
+
+  function restoreFocus(element) {
+    if (element && typeof element.focus === "function" && document.contains(element)) element.focus();
+  }
+
   function loadHistory() {
     try {
       var stored = JSON.parse(window.localStorage.getItem("worksonmymachine.auditHistory") || "[]");
@@ -108,18 +133,81 @@
     }
   }
 
+  function loadFindingFilters() {
+    try {
+      var stored = JSON.parse(window.localStorage.getItem(findingFilterStorageKey) || "null");
+      if (!stored || typeof stored !== "object") return;
+      if (["all", "critical", "high", "fixed"].indexOf(stored.issueFilter) >= 0) state.issueFilter = stored.issueFilter;
+      if (typeof stored.issueSearch === "string") state.issueSearch = stored.issueSearch.slice(0, 240);
+      if (findingSortKeys.indexOf(stored.issueSortKey) >= 0) state.issueSortKey = stored.issueSortKey;
+      if (["asc", "desc"].indexOf(stored.issueSortDirection) >= 0) state.issueSortDirection = stored.issueSortDirection;
+      var page = Number(stored.issuePage);
+      if (Number.isInteger(page) && page > 0) state.issuePage = page;
+    } catch (error) {
+      // A disabled or malformed local storage entry should not block the register.
+    }
+  }
+
+  function persistFindingFilters() {
+    try {
+      window.localStorage.setItem(findingFilterStorageKey, JSON.stringify({
+        issueFilter: state.issueFilter,
+        issueSearch: state.issueSearch,
+        issueSortKey: state.issueSortKey,
+        issueSortDirection: state.issueSortDirection,
+        issuePage: state.issuePage,
+      }));
+    } catch (error) {
+      // Filtering remains fully usable when browser storage is unavailable.
+    }
+  }
+
+  function certificateHistoryMetadata(report) {
+    var certificate = selectedCertificate(report);
+    var verified = Boolean(certificate.is_cleanroom_certified || certificate.verified);
+    return {
+      status: certificate.root_hash ? (verified ? "verified" : "generated") : "pending",
+      root_hash: certificate.root_hash || null,
+      verified: verified,
+    };
+  }
+
+  function artifactHistoryMetadata(target) {
+    var safeTarget = String(target || "workspace").replace(/[^A-Za-z0-9._-]+/g, "-");
+    return [
+      { kind: "json", label: "JSON", filename: safeTarget + "-audit.json", downloadable: true },
+      { kind: "certificate", label: "Certificate", filename: safeTarget + "-certificate.json", downloadable: true },
+      { kind: "patch", label: "Patch", filename: safeTarget + "-healed.patch", downloadable: true },
+      { kind: "sarif", label: "SARIF", filename: safeTarget + "-audit.sarif", downloadable: true },
+      { kind: "markdown", label: "Markdown", filename: safeTarget + "-audit.md", downloadable: true },
+    ];
+  }
+
+  function changedFilesForReport(report) {
+    var paths = healedFileDiffs(report).map(function (entry) { return entry.path; });
+    var patch = report && (report.dockerfile_patch || safeArray(report.dockerfile_patches)[0]);
+    if (patch && patch.file_path) paths.push(normalizeFilePath(patch.file_path));
+    return paths.filter(function (path, index, values) { return path && values.indexOf(path) === index; });
+  }
+
   function saveAuditHistory() {
     if (!state.report) return;
     var report = state.report;
     var id = String(report.target || state.target) + "|" + String(report.scanned_at || "");
+    var timestamp = report.scanned_at || new Date().toISOString();
     var record = {
       id: id,
       target: state.target,
-      scanned_at: report.scanned_at || new Date().toISOString(),
+      scanned_at: timestamp,
+      timestamp: timestamp,
       auto_heal: Boolean(state.auditWasAutoHealed),
       new_only: Boolean(state.newOnly),
       readiness: readinessScore(report),
+      findings: displayIssues().length,
       issue_count: displayIssues().length,
+      certificate: certificateHistoryMetadata(report),
+      changed_files: changedFilesForReport(report),
+      artifacts: artifactHistoryMetadata(state.target),
       report: report,
       build_verification: state.buildVerification,
     };
@@ -131,7 +219,7 @@
     persistHistory();
   }
 
-  function selectHistory(id) {
+  function selectHistory(id, options) {
     var record = state.history.find(function (item) { return item.id === id; });
     if (!record || !record.report) return;
     state.selectedHistoryId = record.id;
@@ -157,6 +245,7 @@
     if (baselineToggle) baselineToggle.checked = state.newOnly;
     renderTargetDescription();
     renderAll();
+    if (!options || options.syncUrl !== false) syncRoute(state.activeView, { run: record.id });
   }
 
   function renderTargetDescription() {
@@ -309,7 +398,7 @@
   }
 
   function issueText(issue) {
-    return [issue.category, issue.message, issue.remediation, issue.file_path, safeArray(issue.evidence).join(" ")].join(" ").toLowerCase();
+    return [issueRule(issue), issue.category, issue.message, issue.remediation, issue.file_path, safeArray(issue.evidence).join(" ")].join(" ").toLowerCase();
   }
 
   function affectedPlatforms(issue) {
@@ -332,6 +421,46 @@
 
   function issueFingerprint(issue) {
     return [issue && issue.issue_id, issue && issue.file_path, issue && issue.line_number, issue && issue.message].join("|");
+  }
+
+  function issueRule(issue) {
+    return String(issue && (issue.rule_id || issue.rule || issue.ruleId || issue.category || issue.issue_id) || "unclassified");
+  }
+
+  function issueStatus(issue) {
+    return issueIsFixed(issue) ? "fixed" : "open";
+  }
+
+  function issueSelectionKey(issue, index) {
+    return issueFingerprint(issue) + "#" + String(index);
+  }
+
+  function issueSortValue(issue, key) {
+    if (key === "severity") return { low: 1, medium: 2, high: 3, critical: 4 }[severityClass(issue && issue.severity)] || 0;
+    if (key === "path") return String(issue && issue.file_path || "").toLowerCase();
+    if (key === "rule") return issueRule(issue).toLowerCase();
+    if (key === "status") return issueStatus(issue) === "fixed" ? 1 : 0;
+    return "";
+  }
+
+  function sortIssueEntries(entries) {
+    var direction = state.issueSortDirection === "asc" ? 1 : -1;
+    return entries.slice().sort(function (left, right) {
+      var leftValue = issueSortValue(left.issue, state.issueSortKey);
+      var rightValue = issueSortValue(right.issue, state.issueSortKey);
+      var result;
+      if (typeof leftValue === "number" && typeof rightValue === "number") result = leftValue - rightValue;
+      else result = String(leftValue).localeCompare(String(rightValue), undefined, { numeric: true, sensitivity: "base" });
+      if (result === 0) result = left.index - right.index;
+      return result * direction;
+    });
+  }
+
+  function issueEntriesForExport() {
+    var issues = displayIssues();
+    return sortIssueEntries(issues.filter(issueMatches).map(function (issue) {
+      return { issue: issue, index: issues.indexOf(issue) };
+    }));
   }
 
   function displayIssues() {
@@ -379,25 +508,83 @@
     if (!list) return;
     renderIssueCounts(issues);
     var filtered = issues.filter(issueMatches);
-    if (!filtered.length) {
+    var entries = sortIssueEntries(filtered.map(function (issue) {
+      return { issue: issue, index: issues.indexOf(issue) };
+    }));
+    var knownKeys = {};
+    issues.forEach(function (issue, index) { knownKeys[issueSelectionKey(issue, index)] = true; });
+    Object.keys(state.selectedIssueKeys).forEach(function (key) {
+      if (!knownKeys[key]) delete state.selectedIssueKeys[key];
+    });
+    var pageCount = Math.max(1, Math.ceil(entries.length / state.issuePageSize));
+    state.issuePage = Math.min(Math.max(1, state.issuePage), pageCount);
+    var pageStart = (state.issuePage - 1) * state.issuePageSize;
+    var pageEntries = entries.slice(pageStart, pageStart + state.issuePageSize);
+    var selectedVisible = pageEntries.filter(function (entry) { return state.selectedIssueKeys[issueSelectionKey(entry.issue, entry.index)]; }).length;
+    var selectedTotal = Object.keys(state.selectedIssueKeys).length;
+    var selectAll = byId("issue-select-all");
+    if (selectAll) {
+      selectAll.checked = pageEntries.length > 0 && selectedVisible === pageEntries.length;
+      selectAll.indeterminate = selectedVisible > 0 && selectedVisible < pageEntries.length;
+    }
+    var sort = byId("issue-sort");
+    if (sort) sort.value = state.issueSortKey;
+    var direction = byId("issue-sort-direction");
+    if (direction) {
+      direction.textContent = state.issueSortDirection.toUpperCase();
+      direction.setAttribute("aria-label", "Sort direction: " + state.issueSortDirection);
+    }
+    var search = byId("issue-search");
+    if (search && document.activeElement !== search) search.value = state.issueSearch;
+    document.querySelectorAll("[data-issue-filter]").forEach(function (button) {
+      var active = button.getAttribute("data-issue-filter") === state.issueFilter;
+      button.classList.toggle("is-active", active);
+      button.setAttribute("aria-pressed", active ? "true" : "false");
+    });
+    var issueFilterButton = byId("issue-filter-button");
+    if (issueFilterButton) issueFilterButton.setAttribute("aria-pressed", state.issueFilter === "fixed" ? "true" : "false");
+    list.setAttribute("aria-live", "polite");
+    var rangeStart = entries.length ? pageStart + 1 : 0;
+    var rangeEnd = Math.min(pageStart + pageEntries.length, entries.length);
+    setText("issue-selection-count", selectedTotal + " selected");
+    setText("issue-results-meta", entries.length ? "Showing " + rangeStart + "-" + rangeEnd + " of " + entries.length : "0 findings");
+    if (!entries.length) {
       list.innerHTML = '<div class="empty-state">' + icon(state.report ? "checkSuccess" : "bug", 25) + '<strong>' + (state.report ? "No matching findings" : "Awaiting repository scan") + '</strong><span>' + (state.report ? "Adjust the issue filter or search term." : "Run Auto-Heal & Certify to load cross-platform evidence.") + '</span></div>';
       hydrateIcons();
       return;
     }
-    list.innerHTML = '<div class="table-scroll"><table class="issues-table"><thead><tr><th>ID</th><th>Severity</th><th>OS affected</th><th>Description</th><th>File / path</th><th>Status</th></tr></thead><tbody>' + filtered.map(function (issue) {
-      var originalIndex = issues.indexOf(issue);
+    list.innerHTML = '<div class="table-scroll"><table class="issues-table"><thead><tr><th class="issue-select-column"><span class="sr-only">Select</span></th><th>ID</th><th>Severity</th><th>Rule</th><th>OS affected</th><th>Description</th><th>File / path</th><th>Status</th></tr></thead><tbody>' + pageEntries.map(function (entry) {
+      var issue = entry.issue;
+      var originalIndex = entry.index;
       var severity = severityClass(issue.severity);
       var fixed = issueIsFixed(issue);
+      var selectionKey = issueSelectionKey(issue, originalIndex);
       var platforms = affectedPlatforms(issue).map(function (platform) {
         var names = { linux: "linuxLogo", windows: "windowsLogo", apple: "appleLogo" };
         return iconClass(names[platform], 15, platform + "-logo", platform);
       }).join("");
       var description = issue.remediation || "Review this assumption before moving the build to a clean room.";
-      return '<tr data-issue-index="' + originalIndex + '" tabindex="0"><td><code>' + escapeHtml(issueDisplayId(issue, originalIndex)) + '</code></td><td><span class="severity severity-' + severity + '">' + escapeHtml(severity) + '</span></td><td><span class="os-icons" aria-label="Affected platforms">' + platforms + '</span></td><td><div class="issue-desc"><strong>' + escapeHtml(issue.message || "Unclassified issue") + '</strong><span>' + escapeHtml(description) + '</span></div></td><td><span class="issue-path" title="' + escapeHtml(issueLocation(issue)) + '">' + escapeHtml(issueLocation(issue)) + '</span></td><td><span class="issue-status ' + (fixed ? "status-fixed" : "status-open") + '">' + (fixed ? "FIXED" : "OPEN") + '</span></td></tr>';
-    }).join("") + '</tbody></table></div>';
+      return '<tr data-issue-index="' + originalIndex + '" tabindex="0" role="button" aria-label="Open issue ' + escapeHtml(issueDisplayId(issue, originalIndex)) + ': ' + escapeHtml(issue.message || "Unclassified issue") + '"><td class="issue-select-column"><input class="issue-row-select" type="checkbox" data-issue-selection="' + escapeHtml(selectionKey) + '" aria-label="Select ' + escapeHtml(issueDisplayId(issue, originalIndex)) + '"' + (state.selectedIssueKeys[selectionKey] ? ' checked' : '') + '></td><td><code>' + escapeHtml(issueDisplayId(issue, originalIndex)) + '</code></td><td><span class="severity severity-' + severity + '">' + escapeHtml(severity) + '</span></td><td><code class="issue-rule" title="' + escapeHtml(issueRule(issue)) + '">' + escapeHtml(issueRule(issue)) + '</code></td><td><span class="os-icons" aria-label="Affected platforms">' + platforms + '</span></td><td><div class="issue-desc"><strong>' + escapeHtml(issue.message || "Unclassified issue") + '</strong><span>' + escapeHtml(description) + '</span></div></td><td><span class="issue-path" title="' + escapeHtml(issueLocation(issue)) + '">' + escapeHtml(issueLocation(issue)) + '</span></td><td><span class="issue-status ' + (fixed ? "status-fixed" : "status-open") + '">' + (fixed ? "FIXED" : "OPEN") + '</span></td></tr>';
+    }).join("") + '</tbody></table></div><div class="issue-pagination" aria-label="Finding pagination"><button class="button button-dark button-small issue-page-button" type="button" data-issue-page="prev"' + (state.issuePage <= 1 ? ' disabled' : '') + '>Previous</button><span>Page ' + state.issuePage + ' of ' + pageCount + '</span><button class="button button-dark button-small issue-page-button" type="button" data-issue-page="next"' + (state.issuePage >= pageCount ? ' disabled' : '') + '>Next</button></div>';
     list.querySelectorAll("[data-issue-index]").forEach(function (row) {
-      row.addEventListener("click", function () { openIssueDetail(row.getAttribute("data-issue-index")); });
+      row.addEventListener("click", function (event) { if (event.target.closest && event.target.closest("input")) return; openIssueDetail(row.getAttribute("data-issue-index")); });
       row.addEventListener("keydown", function (event) { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openIssueDetail(row.getAttribute("data-issue-index")); } });
+    });
+    list.querySelectorAll("[data-issue-selection]").forEach(function (checkbox) {
+      checkbox.addEventListener("change", function () {
+        var key = checkbox.getAttribute("data-issue-selection");
+        if (checkbox.checked) state.selectedIssueKeys[key] = true;
+        else delete state.selectedIssueKeys[key];
+        renderIssueList();
+      });
+    });
+    list.querySelectorAll("[data-issue-page]").forEach(function (button) {
+      button.addEventListener("click", function () {
+        if (button.disabled) return;
+        state.issuePage += button.getAttribute("data-issue-page") === "next" ? 1 : -1;
+        persistFindingFilters();
+        renderIssueList();
+      });
     });
     hydrateIcons();
   }
@@ -438,13 +625,89 @@
       return;
     }
     list.innerHTML = state.history.map(function (record) {
-      var date = new Date(record.scanned_at || Date.now()).toLocaleString();
+      var date = new Date(record.timestamp || record.scanned_at || Date.now()).toLocaleString();
       var readiness = record.readiness == null ? "--" : Math.round(Number(record.readiness)) + "%";
-      return '<button class="history-item ' + (record.id === state.selectedHistoryId ? "is-active" : "") + '" type="button" data-history-id="' + escapeHtml(record.id) + '"><span><strong>' + escapeHtml(record.target || "workspace") + '</strong><small>' + escapeHtml(date) + ' / ' + escapeHtml(String(record.issue_count || 0)) + ' findings</small></span><em>' + escapeHtml(readiness) + '</em></button>';
+      var findings = record.findings == null ? record.issue_count || 0 : record.findings;
+      return '<button class="history-item ' + (record.id === state.selectedHistoryId ? "is-active" : "") + '" type="button" data-history-id="' + escapeHtml(record.id) + '"><span><strong>' + escapeHtml(record.target || "workspace") + '</strong><small>' + escapeHtml(date) + ' / ' + escapeHtml(String(findings)) + ' findings</small></span><em>' + escapeHtml(readiness) + '</em></button>';
     }).join("");
     list.querySelectorAll("[data-history-id]").forEach(function (button) {
       button.addEventListener("click", function () { selectHistory(button.getAttribute("data-history-id")); });
     });
+  }
+
+  function historyFindingCount(record) {
+    if (!record) return 0;
+    if (Array.isArray(record.findings)) return record.findings.length;
+    return numberOr(record.findings, numberOr(record.issue_count, 0));
+  }
+
+  function historyCertificate(record) {
+    if (record && record.certificate && typeof record.certificate === "object") return record.certificate;
+    var certificate = selectedCertificate(record && record.report);
+    return certificateHistoryMetadata(record && record.report);
+  }
+
+  function historyChangedFiles(record) {
+    if (record && Array.isArray(record.changed_files)) return record.changed_files;
+    return changedFilesForReport(record && record.report);
+  }
+
+  function historyArtifacts(record) {
+    if (record && Array.isArray(record.artifacts) && record.artifacts.length) return record.artifacts;
+    return artifactHistoryMetadata(record && record.target);
+  }
+
+  function historyDate(record) {
+    return new Date(record && (record.timestamp || record.scanned_at) || Date.now()).toLocaleString();
+  }
+
+  function renderHistoryComparison() {
+    var panel = byId("history-comparison");
+    var status = byId("history-selection-status");
+    if (!panel) return;
+    var selectedIndex = state.history.findIndex(function (record) { return record.id === state.selectedHistoryId; });
+    if (selectedIndex < 0) {
+      if (status) status.textContent = "No run selected";
+      panel.innerHTML = '<div class="empty-state compact-empty"><strong>Select a saved run</strong><span>Run metadata and historical deltas will appear here.</span></div>';
+      return;
+    }
+    var record = state.history[selectedIndex];
+    var previous = state.history[selectedIndex + 1] || null;
+    var certificate = historyCertificate(record);
+    var changedFiles = historyChangedFiles(record);
+    var readiness = record.readiness == null ? "--" : Math.round(Number(record.readiness)) + "%";
+    var findings = historyFindingCount(record);
+    var readinessDelta = previous && record.readiness != null && previous.readiness != null ? numberOr(record.readiness, 0) - numberOr(previous.readiness, 0) : null;
+    var findingDelta = previous ? findings - historyFindingCount(previous) : null;
+    if (status) status.textContent = (record.target || "workspace") + " / " + historyDate(record);
+    panel.innerHTML = '<div class="history-selected-header"><div><span class="drawer-kicker">AUDIT RECEIPT</span><strong>' + escapeHtml(record.target || "workspace") + '</strong><small>' + escapeHtml(historyDate(record)) + '</small></div><span class="history-certificate-badge history-certificate-' + escapeHtml(String(certificate.status || "pending")) + '">' + escapeHtml(String(certificate.status || "pending").toUpperCase()) + '</span></div>' +
+      '<div class="history-detail-grid"><div><span>Readiness</span><strong>' + escapeHtml(readiness) + '</strong></div><div><span>Findings</span><strong>' + escapeHtml(String(findings)) + '</strong></div><div><span>Changed files</span><strong>' + escapeHtml(String(changedFiles.length)) + '</strong></div><div><span>Certificate</span><strong>' + escapeHtml(String(certificate.status || "pending")) + '</strong></div></div>' +
+      '<div class="history-delta"><span class="drawer-kicker">COMPARISON</span><p>' + (previous ? "Compared with " + escapeHtml(previous.target || "workspace") + " from " + escapeHtml(historyDate(previous)) + ": readiness " + escapeHtml(readinessDelta == null ? "--" : (readinessDelta >= 0 ? "+" : "") + readinessDelta.toFixed(0) + " points") + ", findings " + escapeHtml(findingDelta == null ? "--" : (findingDelta >= 0 ? "+" : "") + findingDelta) + "." : "This is the earliest saved run; a later run will add a comparison baseline.") + '</p></div>' +
+      '<div class="history-files"><span class="drawer-kicker">CHANGED FILES</span>' + (changedFiles.length ? '<ul>' + changedFiles.map(function (path) { return '<li><code>' + escapeHtml(path) + '</code></li>'; }).join("") + '</ul>' : '<p class="muted-text">No changed files recorded for this run.</p>') + '</div>' +
+      '<div class="history-artifacts"><span class="drawer-kicker">DOWNLOADABLE ARTIFACTS</span><div class="button-row">' + historyArtifacts(record).map(function (artifact) { return '<button class="button button-dark button-small" type="button" data-history-artifact="' + escapeHtml(artifact.kind) + '" data-history-id="' + escapeHtml(record.id) + '">' + escapeHtml(artifact.label || artifact.kind) + '</button>'; }).join("") + '</div></div>';
+  }
+
+  function renderRunHistory() {
+    var list = byId("run-history-list");
+    if (!list) return;
+    setText("history-run-count", state.history.length);
+    setText("history-latest-target", state.history.length ? state.history[0].target || "workspace" : "--");
+    setText("history-latest-time", state.history.length ? historyDate(state.history[0]) : "--");
+    if (!state.history.length) {
+      list.innerHTML = '<div class="history-empty">No saved audit runs yet. Completed audits will appear here automatically.</div>';
+      renderHistoryComparison();
+      return;
+    }
+    list.innerHTML = state.history.map(function (record) {
+      var certificate = historyCertificate(record);
+      var changedFiles = historyChangedFiles(record);
+      var readiness = record.readiness == null ? "--" : Math.round(Number(record.readiness)) + "%";
+      return '<article class="history-run-card ' + (record.id === state.selectedHistoryId ? "is-active" : "") + '"><button class="history-run-select" type="button" data-history-id="' + escapeHtml(record.id) + '"><span><strong>' + escapeHtml(record.target || "workspace") + '</strong><small>' + escapeHtml(historyDate(record)) + '</small></span><em>' + escapeHtml(readiness) + '</em></button><div class="history-run-meta"><span>' + escapeHtml(String(historyFindingCount(record))) + ' findings</span><span>' + escapeHtml(String(changedFiles.length)) + ' changed</span><span class="history-certificate-badge history-certificate-' + escapeHtml(String(certificate.status || "pending")) + '">' + escapeHtml(String(certificate.status || "pending")) + '</span></div></article>';
+    }).join("");
+    list.querySelectorAll("[data-history-id]").forEach(function (button) {
+      button.addEventListener("click", function () { selectHistory(button.getAttribute("data-history-id")); });
+    });
+    renderHistoryComparison();
   }
 
   function renderBuildVerification() {
@@ -582,6 +845,23 @@
     return '<path class="graph-edge" d="M ' + startX + ' ' + startY + ' C ' + (startX + control) + ' ' + startY + ', ' + (endX - control) + ' ' + endY + ', ' + endX + ' ' + endY + '"></path>';
   }
 
+  function renderGraphTextAlternative(nodes, relationships, summary) {
+    setText("dependency-graph-text-summary", summary);
+    var list = byId("dependency-graph-text-list");
+    if (!list) return;
+    if (!nodes.length) {
+      list.innerHTML = "<li>Run an audit to create a text alternative for the dependency evidence.</li>";
+      return;
+    }
+    var nodeItems = nodes.map(function (node) {
+      return "<li><strong>" + escapeHtml(node.label) + "</strong>: " + escapeHtml(node.meta || node.kind) + "</li>";
+    });
+    var relationshipItems = relationships.map(function (relationship) {
+      return "<li>" + escapeHtml(relationship.from.label) + " connects to " + escapeHtml(relationship.to.label) + ".</li>";
+    });
+    list.innerHTML = nodeItems.concat(relationshipItems).join("");
+  }
+
   function renderDependencyGraph() {
     var panel = byId("dependency-graph");
     var status = byId("dependency-graph-status");
@@ -595,12 +875,14 @@
     var evidenceCount = fileNodes.length + manifests.length + packageNames.length + dockerBases.length;
     if (!report && !state.analysis) {
       if (status) status.textContent = "Awaiting audit evidence";
+      renderGraphTextAlternative([], [], "No dependency evidence is available yet.");
       panel.innerHTML = '<div class="empty-state compact-empty">' + icon("dependencyGraph", 25) + '<strong>No dependency evidence yet</strong><span>Run an audit to map certificate files, manifests, parsed packages, and Docker base evidence.</span></div>';
       hydrateIcons();
       return;
     }
     if (!evidenceCount) {
       if (status) status.textContent = "No graphable evidence returned";
+      renderGraphTextAlternative([], [], "The current report returned no graphable dependency evidence.");
       panel.innerHTML = '<div class="empty-state compact-empty">' + icon("dependencyGraph", 25) + '<strong>Nothing to graph yet</strong><span>The current report has no file, manifest, package, or Docker evidence. Run a scan or parse a compiler trace to add evidence.</span></div>';
       return;
     }
@@ -620,21 +902,27 @@
       return { kind: "docker", label: base, meta: "Docker base evidence", x: 820, y: 24 + (packageNames.length + index) * 64 };
     });
     var nodes = [target, certificateNode].concat(graphFiles, packages, dockerNodes);
+    var relationships = [{ from: target, to: certificateNode }];
     var edges = [graphEdgeMarkup(target, certificateNode)];
-    graphFiles.forEach(function (node) { edges.push(graphEdgeMarkup(certificateNode, node)); });
-    packages.forEach(function (node) { edges.push(graphEdgeMarkup(certificateNode, node)); });
-    dockerNodes.forEach(function (node) { edges.push(graphEdgeMarkup(certificateNode, node)); });
+    function connect(from, to) {
+      relationships.push({ from: from, to: to });
+      edges.push(graphEdgeMarkup(from, to));
+    }
+    graphFiles.forEach(function (node) { connect(certificateNode, node); });
+    packages.forEach(function (node) { connect(certificateNode, node); });
+    dockerNodes.forEach(function (node) { connect(certificateNode, node); });
     if (graphFiles.length && packages.length) {
-      packages.forEach(function (node, index) { edges.push(graphEdgeMarkup(graphFiles[index % graphFiles.length], node)); });
+      packages.forEach(function (node, index) { connect(graphFiles[index % graphFiles.length], node); });
     }
     if (dockerNodes.length) {
       var dockerFile = graphFiles.find(function (node) { return /^dockerfile(?:\.|$)/i.test(node.label.split("/").pop()); });
-      if (dockerFile) dockerNodes.forEach(function (node) { edges.push(graphEdgeMarkup(dockerFile, node)); });
+      if (dockerFile) dockerNodes.forEach(function (node) { connect(dockerFile, node); });
     }
     var maxY = Math.max.apply(null, nodes.map(function (node) { return node.y + 52; }));
     var width = 1100;
-    panel.innerHTML = '<svg viewBox="0 0 ' + width + ' ' + Math.max(320, maxY + 24) + '" role="img" aria-label="Dependency evidence graph for ' + escapeHtml(state.target) + '"><g aria-hidden="true">' + edges.join("") + nodes.map(graphNodeMarkup).join("") + '</g></svg>';
-    if (status) status.textContent = nodes.length + " evidence nodes / " + (nodes.length - 1) + " relationships";
+    panel.innerHTML = '<svg viewBox="0 0 ' + width + ' ' + Math.max(320, maxY + 24) + '" role="img" aria-labelledby="dependency-graph-svg-title" aria-describedby="dependency-graph-text-summary"><title id="dependency-graph-svg-title">Dependency evidence graph for ' + escapeHtml(state.target) + '</title><desc>Nodes show the active target, certificate, files, packages, and Docker base evidence. Connections show evidence relationships.</desc><g aria-hidden="true">' + edges.join("") + nodes.map(graphNodeMarkup).join("") + '</g></svg>';
+    renderGraphTextAlternative(nodes, relationships, nodes.length + " evidence nodes and " + relationships.length + " relationships for " + state.target + ".");
+    if (status) status.textContent = nodes.length + " evidence nodes / " + relationships.length + " relationships";
   }
 
   function renderOverview() {
@@ -742,9 +1030,13 @@
     });
   }
 
-  function openIssueDetail(index) {
+  function openIssueDetail(index, options) {
     var issue = displayIssues()[Number(index)];
-    if (issue) renderIssueDetail(issue);
+    if (issue) {
+      if (!options || options.trigger !== false) state.drawerReturnFocus = options && options.trigger || document.activeElement;
+      renderIssueDetail(issue);
+      if (!options || options.syncUrl !== false) syncRoute("bugs", { issue: issue.issue_id || issueDisplayId(issue, Number(index)) });
+    }
   }
 
   function openHealedFile(path) {
@@ -897,6 +1189,7 @@
     renderDependencyGraph();
     renderReportJson();
     renderHistory();
+    renderRunHistory();
     renderBuildReport();
     renderBuildVerification();
     renderAuditState();
@@ -910,25 +1203,58 @@
       selectView(view);
       return;
     }
+    if (!drawer.classList.contains("is-open")) state.drawerReturnFocus = document.activeElement;
     drawer.classList.add("is-open");
     drawer.setAttribute("aria-hidden", "false");
+    var main = byId("app-main");
+    var sidebar = document.querySelector(".sidebar");
+    [main, sidebar].forEach(function (element) {
+      if (!element) return;
+      element.setAttribute("aria-hidden", "true");
+      element.setAttribute("inert", "");
+      if ("inert" in element) element.inert = true;
+    });
     document.querySelectorAll("[data-drawer-view]").forEach(function (panel) {
       panel.classList.toggle("is-active", panel.getAttribute("data-drawer-view") === view);
     });
     setText("drawer-title", "Issue detail");
+    var closeButton = byId("drawer-close");
+    if (closeButton) closeButton.focus();
   }
 
-  function closeDrawer() {
+  function closeDrawer(restore) {
     var drawer = byId("detail-drawer");
     if (!drawer) return;
+    var wasOpen = drawer.classList.contains("is-open");
     drawer.classList.remove("is-open");
     drawer.setAttribute("aria-hidden", "true");
+    var main = byId("app-main");
+    var sidebar = document.querySelector(".sidebar");
+    [main, sidebar].forEach(function (element) {
+      if (!element) return;
+      element.removeAttribute("aria-hidden");
+      element.removeAttribute("inert");
+      if ("inert" in element) element.inert = false;
+    });
+    if (restore === false) state.drawerReturnFocus = null;
+    if (wasOpen && restore !== false) {
+      var returnFocus = state.drawerReturnFocus;
+      state.drawerReturnFocus = null;
+      restoreFocus(returnFocus);
+    }
+  }
+
+  function closeDrawerFromUser() {
+    closeDrawer();
+    syncRoute(state.activeView);
   }
 
   function setTargetPopover(open) {
     var popover = byId("target-path-popover");
     var toggle = byId("workspace-target-toggle");
     if (!popover) return;
+    var wasOpen = popover.classList.contains("is-open");
+    if (open && !popover.classList.contains("is-open")) state.popoverReturnFocus = document.activeElement;
     popover.classList.toggle("is-open", open);
     popover.setAttribute("aria-hidden", open ? "false" : "true");
     if (toggle) toggle.setAttribute("aria-expanded", open ? "true" : "false");
@@ -939,7 +1265,66 @@
         input.focus();
         input.select();
       }
+    } else if (wasOpen) {
+      var returnFocus = state.popoverReturnFocus;
+      state.popoverReturnFocus = null;
+      restoreFocus(returnFocus || toggle);
     }
+  }
+
+  function routeView(value) {
+    var knownViews = ["dashboard", "bugs", "dependency", "sandbox", "build", "security", "reports", "history", "settings"];
+    var candidate = String(value || "").replace(/^\/+/, "").toLowerCase();
+    return knownViews.indexOf(candidate) >= 0 ? candidate : "dashboard";
+  }
+
+  function readRoute() {
+    var searchParams = new URLSearchParams(window.location.search || "");
+    var hash = String(window.location.hash || "").replace(/^#/, "");
+    var hashParts = hash.split("?");
+    var hashParams = new URLSearchParams(hashParts.slice(1).join("?"));
+    var view = hashParts[0] || searchParams.get("view") || searchParams.get("workspace") || "dashboard";
+    if (hashParts[0] === "") view = hashParams.get("view") || hashParams.get("workspace") || view;
+    return {
+      view: routeView(view),
+      issue: hashParams.get("issue") || searchParams.get("issue") || "",
+      run: hashParams.get("run") || searchParams.get("run") || "",
+    };
+  }
+
+  function syncRoute(view, options) {
+    if (!window.location) return;
+    var route = "#" + routeView(view);
+    var query = [];
+    if (options && options.issue) query.push("issue=" + encodeURIComponent(options.issue));
+    if (options && options.run) query.push("run=" + encodeURIComponent(options.run));
+    if (query.length) route += "?" + query.join("&");
+    if (window.location.hash === route) return;
+    if (options && options.replace && window.history && window.history.replaceState) window.history.replaceState(null, "", route);
+    else window.location.hash = route;
+  }
+
+  function openIssueDetailByToken(token, options) {
+    var issues = displayIssues();
+    var normalized = String(token || "").toLowerCase();
+    var index = issues.findIndex(function (issue, issueIndex) {
+      return String(issue && issue.issue_id || "").toLowerCase() === normalized || issueDisplayId(issue, issueIndex).toLowerCase() === normalized;
+    });
+    if (index < 0 && /^\d+$/.test(normalized)) index = Number(normalized);
+    if (index >= 0 && issues[index]) openIssueDetail(index, options);
+  }
+
+  function restoreRoute() {
+    var route = state.pendingRoute || readRoute();
+    state.pendingRoute = route;
+    selectView(route.view, { syncUrl: false });
+    if (route.run) selectHistory(route.run, { syncUrl: false });
+    if (route.issue && state.report) openIssueDetailByToken(route.issue, { syncUrl: false });
+  }
+
+  function handleRouteChange() {
+    state.pendingRoute = readRoute();
+    restoreRoute();
   }
 
   function normalizeWorkspaceTarget(value) {
@@ -1051,11 +1436,10 @@
     }
   }
 
-  function selectView(view) {
+  function selectView(view, options) {
     var requested = view || "dashboard";
-    var knownViews = ["dashboard", "bugs", "dependency", "sandbox", "build", "security", "reports", "settings"];
-    if (knownViews.indexOf(requested) < 0) requested = "dashboard";
-    closeDrawer();
+    requested = routeView(requested);
+    closeDrawer(false);
     document.querySelectorAll("[data-page-view]").forEach(function (page) {
       var active = page.getAttribute("data-page-view") === requested;
       page.classList.toggle("is-active", active);
@@ -1065,6 +1449,7 @@
     document.querySelectorAll(".nav-item[data-view]").forEach(function (button) { button.classList.toggle("is-active", button.getAttribute("data-view") === navView); });
     state.activeView = requested;
     if (requested === "dependency") renderDependencyGraph();
+    if (!options || options.syncUrl !== false) syncRoute(requested, options);
   }
 
   async function loadTargets() {
@@ -1098,6 +1483,7 @@
   async function runAudit(autoHeal, quiet) {
     if (state.busy) return;
     state.busy = true;
+    announceScan((autoHeal ? "Auto-heal and certification" : "Repository scan") + " started for " + state.target + ".");
     state.auditWasAutoHealed = Boolean(autoHeal);
     setBusy("scan-button", true);
     setBusy("heal-button", true);
@@ -1111,12 +1497,14 @@
       state.buildVerification = null;
       setConnection("All Systems Operational", "success");
       logEvent((autoHeal ? "auto-heal" : "audit") + " complete", "success");
+      announceScan((autoHeal ? "Auto-heal and certification" : "Repository scan") + " complete for " + state.target + ". Findings: " + safeArray(state.report && state.report.issues).length + ".");
       saveAuditHistory();
       renderAll();
       if (!quiet) showToast(autoHeal ? "Auto-heal evidence is ready." : "Repository audit is ready.", false);
     } catch (error) {
       setConnection("Audit Failed", "error");
       logEvent("audit failed: " + error.message, "error");
+      announceScan((autoHeal ? "Auto-heal and certification" : "Repository scan") + " failed: " + error.message);
       if (!quiet) showToast("Audit failed: " + error.message, true);
     } finally {
       state.busy = false;
@@ -1288,6 +1676,42 @@
     logEvent(filename + " downloaded", "success");
   }
 
+  function csvCell(value) {
+    return '"' + String(value == null ? "" : value).replace(/"/g, '""') + '"';
+  }
+
+  function findingsCsv(entries) {
+    var lines = [["ID", "Severity", "Rule", "Status", "Path", "Line", "Category", "Message"]];
+    entries.forEach(function (entry) {
+      var issue = entry.issue;
+      lines.push([
+        issueDisplayId(issue, entry.index),
+        severityClass(issue.severity),
+        issueRule(issue),
+        issueStatus(issue),
+        issue.file_path || "",
+        issue.line_number || "",
+        issue.category || "",
+        issue.message || "",
+      ]);
+    });
+    return lines.map(function (line) { return line.map(csvCell).join(","); }).join("\r\n") + "\r\n";
+  }
+
+  function downloadFindingsCsv() {
+    var entries = issueEntriesForExport();
+    var selected = entries.filter(function (entry) { return state.selectedIssueKeys[issueSelectionKey(entry.issue, entry.index)]; });
+    var selectedCount = Object.keys(state.selectedIssueKeys).length;
+    if (selectedCount) entries = selected;
+    if (!entries.length) {
+      showToast(selectedCount ? "No selected findings match the current filters." : "No findings match the current filters.", true);
+      return;
+    }
+    var targetName = state.target.replace(/[^A-Za-z0-9._-]+/g, "-");
+    downloadText(targetName + "-findings.csv", findingsCsv(entries), "text/csv;charset=utf-8");
+    showToast("Exported " + entries.length + " finding" + (entries.length === 1 ? "" : "s") + " to CSV.", false);
+  }
+
   function clientSarif(report) {
     var results = safeArray(report && report.issues).map(function (issue) {
       var level = { critical: "error", high: "error", medium: "warning", low: "note" }[String(issue.severity || "medium").toLowerCase()] || "warning";
@@ -1342,12 +1766,30 @@
     on("download-patch-button", "click", function () { exportArtifact("patch"); });
     on("download-sarif-button", "click", function () { exportArtifact("sarif"); });
     on("download-markdown-button", "click", function () { exportArtifact("markdown"); });
+    on("issue-export-csv", "click", downloadFindingsCsv);
+    on("issue-clear-selection", "click", function () {
+      state.selectedIssueKeys = {};
+      renderIssueList();
+    });
+    on("issue-select-all", "change", function (event) {
+      var issues = displayIssues();
+      var entries = sortIssueEntries(issues.filter(issueMatches).map(function (issue) {
+        return { issue: issue, index: issues.indexOf(issue) };
+      }));
+      var pageStart = (state.issuePage - 1) * state.issuePageSize;
+      entries.slice(pageStart, pageStart + state.issuePageSize).forEach(function (entry) {
+        var key = issueSelectionKey(entry.issue, entry.index);
+        if (event.target.checked) state.selectedIssueKeys[key] = true;
+        else delete state.selectedIssueKeys[key];
+      });
+      renderIssueList();
+    });
     on("new-only-toggle", "change", function (event) {
       state.newOnly = Boolean(event.target.checked);
       if (state.report) runAudit(state.auditWasAutoHealed, false);
     });
     on("view-file-button", "click", function () { selectView("build"); });
-    on("drawer-close", "click", closeDrawer);
+    on("drawer-close", "click", closeDrawerFromUser);
     on("terminal-toggle", "click", function () { selectView("reports"); });
     on("open-sandbox-button", "click", function () { selectView("sandbox"); });
     on("workspace-target-toggle", "click", function () {
@@ -1399,23 +1841,48 @@
       logEvent("target changed to " + state.target, "info");
       runAudit(false, false);
     });
-    on("issue-search", "input", function (event) { state.issueSearch = event.target.value || ""; renderIssueList(); });
+    on("issue-search", "input", function (event) { state.issueSearch = event.target.value || ""; state.issuePage = 1; persistFindingFilters(); renderIssueList(); });
     document.querySelectorAll("[data-issue-filter]").forEach(function (button) {
       button.addEventListener("click", function () {
         state.issueFilter = button.getAttribute("data-issue-filter") || "all";
-        document.querySelectorAll("[data-issue-filter]").forEach(function (item) { item.classList.toggle("is-active", item === button); });
+        state.issuePage = 1;
+        persistFindingFilters();
         renderIssueList();
       });
     });
     on("issue-filter-button", "click", function () {
       state.issueFilter = state.issueFilter === "all" ? "fixed" : "all";
-      document.querySelectorAll("[data-issue-filter]").forEach(function (item) { item.classList.toggle("is-active", item.getAttribute("data-issue-filter") === state.issueFilter); });
+      state.issuePage = 1;
+      persistFindingFilters();
+      renderIssueList();
+    });
+    on("issue-sort", "change", function (event) {
+      state.issueSortKey = findingSortKeys.indexOf(event.target.value) >= 0 ? event.target.value : "severity";
+      state.issuePage = 1;
+      persistFindingFilters();
+      renderIssueList();
+    });
+    on("issue-sort-direction", "click", function () {
+      state.issueSortDirection = state.issueSortDirection === "asc" ? "desc" : "asc";
+      state.issuePage = 1;
+      persistFindingFilters();
       renderIssueList();
     });
     on("verify-build-button", "click", function () { selectView("build"); verifyBuild(); });
     document.querySelectorAll("[data-view]").forEach(function (button) { button.addEventListener("click", function () { selectView(button.getAttribute("data-view")); }); });
     document.querySelectorAll("[data-log-preset]").forEach(function (button) { button.addEventListener("click", function () { var editor = byId("compiler-log-editor"); if (editor) editor.value = logPresets[button.getAttribute("data-log-preset")] || ""; }); });
     document.addEventListener("click", function (event) {
+      var historyArtifactButton = event.target.closest ? event.target.closest("[data-history-artifact]") : null;
+      if (historyArtifactButton) {
+        event.preventDefault();
+        var historyRecordId = historyArtifactButton.getAttribute("data-history-id") || "";
+        var historyRecord = state.history.find(function (record) { return record.id === historyRecordId; });
+        if (historyRecord) {
+          selectHistory(historyRecord.id);
+          exportArtifact(historyArtifactButton.getAttribute("data-history-artifact") || "json");
+        }
+        return;
+      }
       var healedFileButton = event.target.closest ? event.target.closest("[data-healed-file]") : null;
       if (healedFileButton) {
         event.preventDefault();
@@ -1432,20 +1899,53 @@
       var drawer = byId("detail-drawer");
       if (event.key === "Escape" && drawer && drawer.classList.contains("is-open")) {
         event.preventDefault();
-        closeDrawer();
+        closeDrawerFromUser();
+        return;
+      }
+      if (event.key === "Tab" && drawer && drawer.classList.contains("is-open")) {
+        var focusable = focusableElements(drawer);
+        if (!focusable.length) {
+          event.preventDefault();
+          drawer.focus();
+          return;
+        }
+        var first = focusable[0];
+        var last = focusable[focusable.length - 1];
+        if (!drawer.contains(document.activeElement)) {
+          event.preventDefault();
+          first.focus();
+        } else if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
+        return;
+      }
+      var popover = byId("target-path-popover");
+      if (event.key === "Escape" && popover && popover.classList.contains("is-open")) {
+        event.preventDefault();
+        setTargetPopover(false);
       }
     });
+    window.addEventListener("hashchange", handleRouteChange);
+    window.addEventListener("popstate", handleRouteChange);
   }
 
   async function bootstrap() {
     loadHistory();
+    loadFindingFilters();
+    state.pendingRoute = readRoute();
     hydrateIcons();
     bindEvents();
+    selectView(state.pendingRoute.view, { syncUrl: false });
     renderTargetDescription();
     renderTerminal();
     renderAll();
     await loadTargets();
     await runAudit(true, true);
+    restoreRoute();
   }
 
   window.cleanRoomApp = {
@@ -1456,6 +1956,8 @@
     compare: compare,
     verifyBuild: verifyBuild,
     selectView: selectView,
+    downloadFindingsCsv: downloadFindingsCsv,
+    findingsCsv: findingsCsv,
   };
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", bootstrap); else bootstrap();

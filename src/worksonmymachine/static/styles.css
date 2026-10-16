@@ -1197,6 +1197,11 @@ pre,
   overflow: auto;
 }
 
+.bugs-panel .issue-table-wrap {
+  max-height: calc(100vh - 240px);
+  overflow-y: auto;
+}
+
 .table-scroll {
   min-width: 640px;
 }
@@ -1219,6 +1224,13 @@ pre,
   letter-spacing: 0.07em;
   text-align: left;
   text-transform: uppercase;
+}
+
+.bugs-panel table thead {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: #050b15;
 }
 
 .issues-table td {
@@ -1846,6 +1858,51 @@ pre,
   border-radius: 3px;
   font-family: var(--mono);
   font-size: 9px;
+}
+
+.healed-file-chips {
+  margin-bottom: 12px;
+}
+
+.healed-file-chip {
+  cursor: pointer;
+  transition: color 140ms ease, background 140ms ease, border-color 140ms ease;
+}
+
+.healed-file-chip:hover,
+.healed-file-chip[aria-pressed="true"] {
+  color: #d9fbff;
+  background: rgba(34, 211, 238, 0.14);
+  border-color: rgba(34, 211, 238, 0.58);
+}
+
+.healed-file-selection {
+  margin: 7px 0 0;
+  color: #dce7f1;
+  font-family: var(--mono);
+  font-size: 10px;
+}
+
+.build-report-copy {
+  margin-bottom: 13px;
+  color: #91a0b5;
+  font-size: 10px;
+}
+
+.merkle-hash-chips {
+  margin-top: 13px;
+}
+
+.merkle-hash-chip {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.merkle-hash-chip code {
+  color: #b7f7dc;
+  font-size: 8px;
 }
 
 .muted-text {

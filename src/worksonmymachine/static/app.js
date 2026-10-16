@@ -15,6 +15,7 @@
     auditWasAutoHealed: false,
     issueFilter: "all",
     issueSearch: "",
+    selectedHealedFilePath: null,
     activeView: "dashboard",
     events: [{ message: "clean room ready", level: "success", time: new Date() }],
     busy: false,
@@ -465,6 +466,79 @@
     output.textContent = (result.detail || "") + (result.output ? "\n\n" + result.output : "");
   }
 
+  function unifiedDiffText(diff) {
+    if (typeof diff === "string") return diff;
+    if (!diff || typeof diff !== "object") return "";
+    return String(diff.unified_diff || diff.diff || diff.patch || "");
+  }
+
+  function normalizeFilePath(path) {
+    var normalized = String(path || "").trim().replace(/\\/g, "/");
+    if (!normalized || normalized === "/dev/null" || normalized === "dev/null") return "";
+    normalized = normalized.replace(/^\.\//, "");
+    if (normalized.indexOf("a/") === 0 || normalized.indexOf("b/") === 0) normalized = normalized.slice(2);
+    return normalized;
+  }
+
+  function unifiedDiffHeaderPath(line) {
+    var value = String(line || "").replace(/^(?:---|\+\+\+)\s+/, "").trim();
+    if (!value) return "";
+    var tab = value.indexOf("\t");
+    if (tab >= 0) value = value.slice(0, tab);
+    if (value.length > 1 && value.charAt(0) === '"' && value.charAt(value.length - 1) === '"') value = value.slice(1, -1);
+    return normalizeFilePath(value);
+  }
+
+  function unifiedDiffPath(diff) {
+    var text = unifiedDiffText(diff);
+    var lines = text.split("\n");
+    var oldPath = "";
+    var newPath = "";
+    lines.some(function (line) {
+      if (!oldPath && /^---\s+/.test(line)) oldPath = unifiedDiffHeaderPath(line);
+      if (!newPath && /^\+\+\+\s+/.test(line)) newPath = unifiedDiffHeaderPath(line);
+      return Boolean(oldPath && newPath);
+    });
+    if (newPath) return newPath;
+    if (oldPath) return oldPath;
+    var gitHeader = text.match(/^diff --git\s+\S+\s+(\S+)$/m);
+    return gitHeader ? normalizeFilePath(gitHeader[1]) : "";
+  }
+
+  function healedFileDiffs(report) {
+    var seen = {};
+    return safeArray(report && report.unified_diffs).map(function (diff, index) {
+      return { path: unifiedDiffPath(diff), diff: unifiedDiffText(diff), index: index };
+    }).filter(function (entry) {
+      if (!entry.path || !entry.diff || seen[entry.path]) return false;
+      seen[entry.path] = true;
+      return true;
+    });
+  }
+
+  function issueIndexForFile(path) {
+    var normalized = normalizeFilePath(path);
+    if (!normalized) return -1;
+    return displayIssues().findIndex(function (issue) {
+      return normalizeFilePath(issue && issue.file_path) === normalized;
+    });
+  }
+
+  function renderBuildReport() {
+    var panel = byId("build-report-panel");
+    if (!panel) return;
+    var entries = healedFileDiffs(state.report);
+    var selected = entries.find(function (entry) { return entry.path === state.selectedHealedFilePath; });
+    if (!selected) state.selectedHealedFilePath = null;
+    var chips = entries.map(function (entry) {
+      var issueIndex = issueIndexForFile(entry.path);
+      var action = issueIndex >= 0 ? "Open issue detail" : "View healed file diff";
+      return '<button class="package-chip healed-file-chip" type="button" data-healed-file="' + escapeHtml(entry.path) + '" aria-label="' + escapeHtml(action + ": " + entry.path) + '" title="' + escapeHtml(action) + '" aria-pressed="' + (entry.path === state.selectedHealedFilePath ? "true" : "false") + '">' + escapeHtml(entry.path) + '</button>';
+    }).join("");
+    var selectedMarkup = selected ? '<div class="drawer-kicker">SELECTED HEALED FILE</div><div class="healed-file-selection"><code>' + escapeHtml(selected.path) + '</code></div><pre class="source-context" id="build-healed-file-diff">' + diffText(selected.diff) + '</pre>' : '';
+    panel.innerHTML = '<div class="build-report-copy">Build verification is opt-in and runs only against a temporary staged copy.</div>' + (entries.length ? '<div class="drawer-kicker">HEALED FILES</div><div class="package-cloud healed-file-chips" aria-label="Healed files">' + chips + '</div>' : '<div class="muted-text">No healed file diffs returned.</div>') + selectedMarkup;
+  }
+
   function dependencyPackages(report) {
     var packages = [];
     var analysis = state.analysis || {};
@@ -491,9 +565,11 @@
 
   function graphNodeMarkup(node) {
     var width = 190;
-    var label = truncate(node.label, 26, 0);
-    var meta = truncate(node.meta || node.kind, 30, 0);
-    return '<g class="graph-node graph-node-' + escapeHtml(node.kind) + '" transform="translate(' + node.x + ' ' + node.y + ')"><rect width="' + width + '" height="52" rx="5"></rect><text x="12" y="22">' + escapeHtml(label) + '</text><text class="graph-node-meta" x="12" y="39">' + escapeHtml(meta) + '</text></g>';
+    var fullLabel = String(node.label || "pending");
+    var fullMeta = String(node.meta || node.kind || "");
+    var label = truncate(fullLabel, 26, 0);
+    var meta = truncate(fullMeta, 30, 0);
+    return '<g class="graph-node graph-node-' + escapeHtml(node.kind) + '" transform="translate(' + node.x + ' ' + node.y + ')"><title>' + escapeHtml(fullLabel + " | " + fullMeta) + '</title><rect width="' + width + '" height="52" rx="5"></rect><text x="12" y="22">' + escapeHtml(label) + '</text><text class="graph-node-meta" x="12" y="39">' + escapeHtml(meta) + '</text></g>';
   }
 
   function graphEdgeMarkup(from, to) {
@@ -528,19 +604,19 @@
       return;
     }
 
-    var target = { kind: "target", label: state.target, meta: "active workspace target", x: 24, y: 24 };
-    var certificateNode = { kind: "certificate", label: certificate.root_hash ? "CleanRoom certificate" : "Certificate pending", meta: certificate.root_hash ? truncate(certificate.root_hash, 16, 0) : "audit proof", x: 248, y: 24 };
+    var target = { kind: "target", label: state.target, meta: "active workspace target", x: 40, y: 24 };
+    var certificateNode = { kind: "certificate", label: certificate.root_hash ? "CleanRoom certificate" : "Certificate pending", meta: certificate.root_hash || "audit proof", x: 280, y: 24 };
     var graphFiles = fileNodes.slice(0, 14).map(function (node, index) {
-      return { kind: "file", label: node.path, meta: (node.has_crlf ? "file / CRLF / " : "file / ") + truncate(node.digest, 12, 0), x: 472, y: 24 + index * 64 };
+      return { kind: "file", label: node.path, meta: (node.has_crlf ? "file / CRLF / " : "file / ") + String(node.digest || "pending"), x: 540, y: 24 + index * 64 };
     });
     manifests.filter(function (manifest) { return !graphFiles.some(function (node) { return node.label === manifest; }); }).slice(0, 8).forEach(function (manifest, index) {
-      graphFiles.push({ kind: "file", label: manifest, meta: "manifest / lock evidence", x: 472, y: 24 + (fileNodes.length + index) * 64 });
+      graphFiles.push({ kind: "file", label: manifest, meta: "manifest / lock evidence", x: 540, y: 24 + (fileNodes.length + index) * 64 });
     });
     var packages = packageNames.map(function (name, index) {
-      return { kind: "package", label: name, meta: "apt package / parsed build evidence", x: 716, y: 24 + index * 64 };
+      return { kind: "package", label: name, meta: "apt package / parsed build evidence", x: 820, y: 24 + index * 64 };
     });
     var dockerNodes = dockerBases.map(function (base, index) {
-      return { kind: "docker", label: base, meta: "Docker base evidence", x: 716, y: 24 + (packageNames.length + index) * 64 };
+      return { kind: "docker", label: base, meta: "Docker base evidence", x: 820, y: 24 + (packageNames.length + index) * 64 };
     });
     var nodes = [target, certificateNode].concat(graphFiles, packages, dockerNodes);
     var edges = [graphEdgeMarkup(target, certificateNode)];
@@ -555,7 +631,7 @@
       if (dockerFile) dockerNodes.forEach(function (node) { edges.push(graphEdgeMarkup(dockerFile, node)); });
     }
     var maxY = Math.max.apply(null, nodes.map(function (node) { return node.y + 52; }));
-    var width = 930;
+    var width = 1100;
     panel.innerHTML = '<svg viewBox="0 0 ' + width + ' ' + Math.max(320, maxY + 24) + '" role="img" aria-label="Dependency evidence graph for ' + escapeHtml(state.target) + '"><g aria-hidden="true">' + edges.join("") + nodes.map(graphNodeMarkup).join("") + '</g></svg>';
     if (status) status.textContent = nodes.length + " evidence nodes / " + (nodes.length - 1) + " relationships";
   }
@@ -579,10 +655,9 @@
   function issueDiff(issue) {
     var report = state.report;
     if (!report || !issue || !issue.file_path) return "";
-    var path = String(issue.file_path).replace(/^\.\//, "");
-    return safeArray(report.unified_diffs).find(function (diff) {
-      return diff.indexOf("a/" + path) >= 0 || diff.indexOf("b/" + path) >= 0;
-    }) || "";
+    var path = normalizeFilePath(issue.file_path);
+    var entry = healedFileDiffs(report).find(function (item) { return item.path === path; });
+    return entry ? entry.diff : "";
   }
 
   function renderIssueDetail(issue) {
@@ -623,6 +698,20 @@
   function openIssueDetail(index) {
     var issue = displayIssues()[Number(index)];
     if (issue) renderIssueDetail(issue);
+  }
+
+  function openHealedFile(path) {
+    var entry = healedFileDiffs(state.report).find(function (item) { return item.path === normalizeFilePath(path); });
+    if (!entry) return;
+    state.selectedHealedFilePath = entry.path;
+    var issueIndex = issueIndexForFile(entry.path);
+    if (issueIndex >= 0) {
+      renderBuildReport();
+      openIssueDetail(issueIndex);
+      return;
+    }
+    renderBuildReport();
+    selectView("build");
   }
 
   function diffText(text) {
@@ -683,6 +772,29 @@
     return '<div class="diff-columns"><div class="diff-column"><div class="diff-column-header">Before (broken)</div>' + rows.map(function (row) { return diffLineMarkup(row.left, row.leftNumber); }).join("") + '</div><div class="diff-column"><div class="diff-column-header">After (healed)</div>' + rows.map(function (row) { return diffLineMarkup(row.right, row.rightNumber); }).join("") + '</div></div>';
   }
 
+  function merkleLeaves(certificate) {
+    var leaves = [];
+    function collect(items, depth) {
+      safeArray(items).slice(0, 8).forEach(function (node) {
+        var children = safeArray(node && node.children);
+        if (children.length && depth < 3) collect(children, depth + 1);
+        else leaves.push(node);
+      });
+    }
+    collect(certificate && certificate.file_nodes, 0);
+    return leaves.slice(0, 5);
+  }
+
+  function renderMerkleHashChips(certificate) {
+    var leaves = merkleLeaves(certificate);
+    if (!leaves.length) return "";
+    return '<div class="merkle-hash-chips" aria-label="File node hashes"><div class="drawer-kicker">FILE NODE HASHES</div><div class="package-cloud">' + leaves.map(function (node) {
+      var path = String(node && node.path || "file node");
+      var digest = String(node && (node.digest || node.raw_sha256) || "pending");
+      return '<span class="package-chip merkle-hash-chip" title="' + escapeHtml(path + " SHA-256 " + digest) + '">' + escapeHtml(path) + ' <code>' + escapeHtml(truncate(digest, 10, 0)) + '</code></span>';
+    }).join("") + '</div></div>';
+  }
+
   function renderDockerfile() {
     var panel = byId("dockerfile-panel");
     var badge = byId("dockerfile-badge");
@@ -726,7 +838,7 @@
     }
     seal.innerHTML = icons.renderCertificationSeal(certificate);
     metrics.innerHTML = '<div class="metric-line"><span>Runtime</span><strong>' + escapeHtml(certificate.runtime || "unknown") + '</strong></div><div class="metric-line"><span>Lock score</span><strong>' + escapeHtml(numberOr(certificate.dependency_lock_score, 0).toFixed(0) + "%") + '</strong></div><div class="metric-line"><span>Linux readiness</span><strong>' + escapeHtml(numberOr(certificate.linux_readiness_score, 0).toFixed(0) + "%") + '</strong></div>';
-    tree.innerHTML = icons.renderMerkleTreeSVG(certificate, state.comparison || { rootHash: certificate.root_hash });
+    tree.innerHTML = icons.renderMerkleTreeSVG(certificate, state.comparison || { rootHash: certificate.root_hash }) + renderMerkleHashChips(certificate);
   }
 
   function renderAll() {
@@ -738,6 +850,7 @@
     renderDependencyGraph();
     renderReportJson();
     renderHistory();
+    renderBuildReport();
     renderBuildVerification();
     renderAuditState();
     hydrateIcons();
@@ -1165,6 +1278,12 @@
     document.querySelectorAll("[data-view]").forEach(function (button) { button.addEventListener("click", function () { selectView(button.getAttribute("data-view")); }); });
     document.querySelectorAll("[data-log-preset]").forEach(function (button) { button.addEventListener("click", function () { var editor = byId("compiler-log-editor"); if (editor) editor.value = logPresets[button.getAttribute("data-log-preset")] || ""; }); });
     document.addEventListener("click", function (event) {
+      var healedFileButton = event.target.closest ? event.target.closest("[data-healed-file]") : null;
+      if (healedFileButton) {
+        event.preventDefault();
+        openHealedFile(healedFileButton.getAttribute("data-healed-file") || "");
+        return;
+      }
       var copyButton = event.target.closest ? event.target.closest("[data-copy]") : null;
       if (copyButton) copyText(copyButton.getAttribute("data-copy") || "");
       var popover = byId("target-path-popover");

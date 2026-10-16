@@ -274,13 +274,201 @@ def _read_requirements_lock(path: Path) -> tuple[bool, dict[str, str]]:
     return saw_requirement, entries
 
 
-def _toml_dependencies(path: Path) -> tuple[list[str], bool]:
+def _read_toml(path: Path) -> dict[str, Any] | None:
+    """Parse a local TOML file without consulting a package manager."""
+
     text = _read_text(path)
     if not text:
-        return [], False
+        return None
     try:
         parsed = tomllib.loads(text)
     except tomllib.TOMLDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _poetry_dependency_declarations(path: Path) -> tuple[list[tuple[str, str]], bool]:
+    """Read Poetry's dependency table from a pyproject manifest."""
+
+    parsed = _read_toml(path)
+    if parsed is None:
+        return [], False
+    tool = parsed.get("tool")
+    poetry = tool.get("poetry") if isinstance(tool, dict) else None
+    if poetry is None:
+        return [], True
+    if not isinstance(poetry, dict):
+        return [], False
+    dependencies = poetry.get("dependencies", {})
+    dev_dependencies = poetry.get("dev-dependencies", {})
+    groups = poetry.get("group", {})
+    if not isinstance(dependencies, dict) or not isinstance(dev_dependencies, dict):
+        return [], False
+    declarations: list[tuple[str, str]] = []
+
+    def add_table(table: Any) -> bool:
+        if not isinstance(table, dict):
+            return False
+        for name, specification in table.items():
+            # Poetry uses this key for the supported interpreter rather than a
+            # package that must be installed into the environment.
+            if str(name).lower() == "python":
+                continue
+            if isinstance(specification, str):
+                spec = specification
+            elif isinstance(specification, dict):
+                spec = str(specification.get("version", ""))
+            else:
+                return False
+            declarations.append((str(name), spec))
+        return True
+
+    if not add_table(dependencies) or not add_table(dev_dependencies):
+        return [], False
+    if groups:
+        if not isinstance(groups, dict):
+            return [], False
+        for group in groups.values():
+            if not isinstance(group, dict) or not add_table(group.get("dependencies", {})):
+                return [], False
+    return declarations, True
+
+
+def _pipfile_dependency_declarations(path: Path) -> tuple[list[tuple[str, str]], bool]:
+    """Read Pipenv package declarations from a local Pipfile."""
+
+    parsed = _read_toml(path)
+    if parsed is None:
+        return [], False
+    declarations: list[tuple[str, str]] = []
+    for section in ("packages", "dev-packages"):
+        values = parsed.get(section, {})
+        if not isinstance(values, dict):
+            return [], False
+        for name, specification in values.items():
+            if isinstance(specification, str):
+                spec = specification
+            elif isinstance(specification, dict):
+                # Pipenv permits git/path/file sources.  They are represented
+                # as floating in the direct-manifest pin score unless a lock
+                # subsequently resolves them.
+                spec = str(specification.get("version", ""))
+            else:
+                return [], False
+            declarations.append((str(name), spec))
+    return declarations, True
+
+
+def _read_poetry_lock(path: Path) -> tuple[bool, dict[str, str]]:
+    """Validate the package-bearing shape of a Poetry lockfile."""
+
+    parsed = _read_toml(path)
+    if parsed is None:
+        return False, {}
+    metadata = parsed.get("metadata")
+    lock_version = parsed.get("lock-version")
+    if isinstance(metadata, dict):
+        lock_version = metadata.get("lock-version", lock_version)
+    if not isinstance(lock_version, (str, int)) or not str(lock_version).strip():
+        return False, {}
+    packages = parsed.get("package")
+    if not isinstance(packages, list) or not packages:
+        return False, {}
+    entries: dict[str, str] = {}
+    for package in packages:
+        if not isinstance(package, dict):
+            return False, {}
+        name = package.get("name")
+        version = package.get("version")
+        if not isinstance(name, str) or not name.strip():
+            return False, {}
+        if not isinstance(version, str) or not version.strip():
+            return False, {}
+        normalized = name.lower().replace("_", "-")
+        previous = entries.get(normalized)
+        if previous is not None and previous != version:
+            return False, {}
+        entries[normalized] = version
+    return True, entries
+
+
+def _read_uv_lock(path: Path) -> tuple[bool, dict[str, str]]:
+    """Validate uv.lock's local TOML structure and package identities."""
+
+    parsed = _read_toml(path)
+    if parsed is None or not isinstance(parsed.get("version"), int):
+        return False, {}
+    packages = parsed.get("package")
+    if not isinstance(packages, list) or not packages:
+        return False, {}
+    entries: dict[str, str] = {}
+    for package in packages:
+        if not isinstance(package, dict):
+            return False, {}
+        name = package.get("name")
+        if not isinstance(name, str) or not name.strip():
+            return False, {}
+        version = package.get("version", "")
+        source = package.get("source")
+        # uv's editable workspace package intentionally has no version.  All
+        # registry/git/path packages must still carry a version string.
+        if version is not None and not isinstance(version, str):
+            return False, {}
+        if not str(version).strip() and (
+            not isinstance(source, dict) or not source
+        ):
+            return False, {}
+        normalized = name.lower().replace("_", "-")
+        previous = entries.get(normalized)
+        if previous is not None and previous != str(version):
+            return False, {}
+        entries[normalized] = str(version)
+    return True, entries
+
+
+def _read_pipfile_lock(path: Path) -> tuple[bool, dict[str, str]]:
+    """Validate Pipenv's JSON lock metadata and exact package versions."""
+
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False, {}
+    if not isinstance(parsed, dict):
+        return False, {}
+    metadata = parsed.get("_meta")
+    if not isinstance(metadata, dict):
+        return False, {}
+    lock_hash = metadata.get("hash")
+    if (
+        not isinstance(lock_hash, dict)
+        or not isinstance(lock_hash.get("sha256"), str)
+        or not lock_hash["sha256"].strip()
+    ):
+        return False, {}
+    entries: dict[str, str] = {}
+    for section in ("default", "develop"):
+        values = parsed.get(section, {})
+        if not isinstance(values, dict):
+            return False, {}
+        for name, package in values.items():
+            if not isinstance(name, str) or not name.strip() or not isinstance(package, dict):
+                return False, {}
+            version = package.get("version")
+            if not isinstance(version, str) or _pinned_requirement_version(version) is None:
+                return False, {}
+            normalized = name.lower().replace("_", "-")
+            previous = entries.get(normalized)
+            if previous is not None and previous != version:
+                return False, {}
+            entries[normalized] = version
+    # A lock with no package records is not useful evidence, even when its
+    # metadata is syntactically valid.
+    return bool(entries), entries
+
+
+def _toml_dependencies(path: Path) -> tuple[list[str], bool]:
+    parsed = _read_toml(path)
+    if parsed is None:
         return [], False
     project = parsed.get("project", {})
     if not isinstance(project, dict):
@@ -426,11 +614,11 @@ def calculate_dependency_lock_score(target_path: Path) -> float:
     """Score dependency reproducibility from local lock/configuration evidence.
 
     The score is intentionally conservative for declared Python requirements,
-    Cargo lockfiles, and Docker base tags.  A JavaScript project with no
-    ``package-lock.json`` is not penalized merely for having a package manifest;
-    when a lockfile is present it must at least be a valid lockfile.  This
-    matches the copy-on-write healer's supported repairs while still inspecting
-    all dependency formats named by the Phase 4 contract.
+    PEP 621/Poetry/Pipenv manifests, Cargo lockfiles, and Docker base tags.  A
+    JavaScript project with no ``package-lock.json`` is not penalized merely for
+    having a package manifest; when a lockfile is present it must at least be a
+    valid lockfile.  This matches the copy-on-write healer's supported repairs
+    while still inspecting all dependency formats named by the Phase 4 contract.
     """
 
     target = Path(target_path)
@@ -441,6 +629,9 @@ def calculate_dependency_lock_score(target_path: Path) -> float:
     lock_score = 100.0
     pinned_requirement_names: set[str] = set()
     declared_requirement_specs: list[tuple[str, str]] = []
+    pep621_declarations: list[tuple[str, str]] = []
+    poetry_declarations: list[tuple[str, str]] = []
+    pipfile_declarations: list[tuple[str, str]] = []
     requirement_files = [
         (path, relative)
         for path, relative in _iter_files(target)
@@ -456,7 +647,10 @@ def calculate_dependency_lock_score(target_path: Path) -> float:
         pinned_dependencies += declared - unpinned
         pinned_requirement_names.update(names)
 
-    for path, _ in _iter_files(target):
+    pyproject_paths = [
+        path for path, _ in _iter_files(target) if path.name.lower() == "pyproject.toml"
+    ]
+    for path in pyproject_paths:
         if path.name.lower() != "pyproject.toml":
             continue
         dependencies, valid = _toml_dependencies(path)
@@ -468,6 +662,7 @@ def calculate_dependency_lock_score(target_path: Path) -> float:
             declared_requirement_specs.append(
                 (name, requirement.group("spec").strip() if requirement else "")
             )
+            pep621_declarations.append((name, requirement.group("spec").strip() if requirement else ""))
             declared_dependencies += 1
             if name in pinned_requirement_names:
                 pinned_dependencies += 1
@@ -475,32 +670,166 @@ def calculate_dependency_lock_score(target_path: Path) -> float:
             if re.search(r"==\s*[^=\s,;]+", dependency):
                 pinned_dependencies += 1
 
+        poetry, poetry_valid = _poetry_dependency_declarations(path)
+        if poetry_valid:
+            poetry_declarations.extend(
+                (name.lower().replace("_", "-"), specification)
+                for name, specification in poetry
+            )
+            declared_dependencies += len(poetry)
+            pinned_dependencies += sum(
+                1
+                for name, specification in poetry
+                if _package_spec_is_pinned(specification)
+            )
+
+    pipfile_paths = [
+        path for path, _ in _iter_files(target) if path.name.lower() == "pipfile"
+    ]
+    for path in pipfile_paths:
+        declarations, valid = _pipfile_dependency_declarations(path)
+        if not valid:
+            continue
+        normalized = [
+            (name.lower().replace("_", "-"), specification)
+            for name, specification in declarations
+        ]
+        pipfile_declarations.extend(normalized)
+        declared_dependencies += len(normalized)
+        pinned_dependencies += sum(
+            1 for _, specification in normalized if _package_spec_is_pinned(specification)
+        )
+
     lock_paths = [
         path for path, _ in requirement_files if path.name.lower() == "requirements.lock"
     ]
-    if declared_requirement_specs and not lock_paths:
-        lock_score = 0.0
-    elif lock_paths:
-        lock_entries: dict[str, str] = {}
-        if len(lock_paths) != 1:
+    poetry_lock_paths = [
+        path for path, _ in _iter_files(target) if path.name.lower() == "poetry.lock"
+    ]
+    uv_lock_paths = [
+        path for path, _ in _iter_files(target) if path.name.lower() == "uv.lock"
+    ]
+    pipfile_lock_paths = [
+        path for path, _ in _iter_files(target) if path.name.lower() == "pipfile.lock"
+    ]
+
+    def single_lock(
+        paths: list[Path], reader: Any
+    ) -> dict[str, str] | None:
+        if len(paths) != 1:
+            return None
+        valid_lock, entries = reader(paths[0])
+        return entries if valid_lock else None
+
+    requirement_entries = single_lock(lock_paths, _read_requirements_lock)
+    poetry_entries = single_lock(poetry_lock_paths, _read_poetry_lock)
+    uv_entries = single_lock(uv_lock_paths, _read_uv_lock)
+    pipfile_entries = single_lock(pipfile_lock_paths, _read_pipfile_lock)
+
+    def covers(entries: dict[str, str] | None, declarations: list[tuple[str, str]]) -> bool:
+        if entries is None:
+            return False
+        for name, specification in declarations:
+            if not name or name not in entries:
+                return False
+            declared_version = _pinned_requirement_version(specification)
+            if declared_version is None and _package_spec_is_pinned(specification):
+                declared_version = specification.strip().lstrip("=")
+                if declared_version.startswith("v"):
+                    declared_version = declared_version[1:]
+            locked_version = entries[name]
+            if declared_version is not None and locked_version and declared_version != locked_version:
+                return False
+        return True
+
+    def choose_lock(
+        declarations: list[tuple[str, str]],
+        candidates: list[tuple[str, dict[str, str] | None]],
+    ) -> tuple[str, dict[str, str]] | None:
+        for kind, entries in candidates:
+            if covers(entries, declarations):
+                return kind, entries  # type: ignore[return-value]
+        return None
+
+    modern_resolutions: list[tuple[list[tuple[str, str]], tuple[str, dict[str, str]]]] = []
+    if declared_requirement_specs:
+        # Requirements files retain their existing strict requirements.lock
+        # behavior.  The additional declarations below may use modern locks,
+        # but a requirements.txt still needs its own matching lock.
+        requirement_declarations = [
+            declaration
+            for path, _ in requirement_files
+            if path.name.lower() != "requirements.lock"
+            for declaration in _requirement_declarations(path)
+        ]
+        if requirement_declarations and not covers(requirement_entries, requirement_declarations):
+            lock_score = 0.0
+
+    if pep621_declarations:
+        selected = choose_lock(
+            pep621_declarations,
+            [
+                ("requirements", requirement_entries),
+                ("poetry", poetry_entries),
+                ("uv", uv_entries),
+            ],
+        )
+        if selected is None:
+            lock_score = 0.0
+        elif selected[0] in {"poetry", "uv"}:
+            modern_resolutions.append((pep621_declarations, selected))
+
+    if poetry_declarations:
+        selected = choose_lock(
+            poetry_declarations,
+            [
+                ("poetry", poetry_entries),
+                ("uv", uv_entries),
+                ("requirements", requirement_entries),
+            ],
+        )
+        if selected is None:
+            lock_score = 0.0
+        elif selected[0] in {"poetry", "uv"}:
+            modern_resolutions.append((poetry_declarations, selected))
+
+    if pipfile_declarations:
+        selected = choose_lock(pipfile_declarations, [("pipfile", pipfile_entries)])
+        if selected is None:
             lock_score = 0.0
         else:
-            valid_lock, lock_entries = _read_requirements_lock(lock_paths[0])
-            if not valid_lock:
+            modern_resolutions.append((pipfile_declarations, selected))
+
+    # A resolved modern lock is the pinning evidence for PEP 621, Poetry, and
+    # Pipenv manifests.  Their manifest constraints are intentionally allowed
+    # to be ranges; the lock is what makes the installation deterministic.
+    for declarations, (_, entries) in modern_resolutions:
+        for name, specification in declarations:
+            if name in entries and not (
+                _pinned_requirement_version(specification)
+                or _package_spec_is_pinned(specification)
+                or (name in pinned_requirement_names and name in {item[0] for item in pep621_declarations})
+            ):
+                pinned_dependencies += 1
+
+    # If a lockfile is present without a corresponding declaration, it still
+    # needs a valid local shape.  This keeps malformed standalone lockfiles
+    # from silently claiming reproducibility while allowing a valid Poetry or
+    # uv lock to back a PEP 621 project even if another lock type is stale.
+    if not (
+        pep621_declarations
+        or poetry_declarations
+        or pipfile_declarations
+        or declared_requirement_specs
+    ):
+        for paths, reader in (
+            (lock_paths, _read_requirements_lock),
+            (poetry_lock_paths, _read_poetry_lock),
+            (uv_lock_paths, _read_uv_lock),
+            (pipfile_lock_paths, _read_pipfile_lock),
+        ):
+            if paths and single_lock(paths, reader) is None:
                 lock_score = 0.0
-            else:
-                for name, specification in declared_requirement_specs:
-                    if not name:
-                        lock_score = 0.0
-                        break
-                    locked_version = lock_entries.get(name)
-                    if locked_version is None:
-                        lock_score = 0.0
-                        break
-                    declared_version = _pinned_requirement_version(specification)
-                    if declared_version is not None and declared_version != locked_version:
-                        lock_score = 0.0
-                        break
 
     cargo_manifests = [path for path, _ in _iter_files(target) if path.name == "Cargo.toml"]
     cargo_locks = [path for path, _ in _iter_files(target) if path.name == "Cargo.lock"]
@@ -617,6 +946,43 @@ def dependency_telemetry(target_path: Path) -> DependencyTelemetry:
                     match = _REQUIREMENT_LINE.match(specification)
                     is_pinned = bool(match and _pinned_requirement_version(match.group("spec")))
                     add_direct("python", _dependency_name(specification), is_pinned)
+            poetry, poetry_valid = _poetry_dependency_declarations(path)
+            if poetry_valid:
+                manifests.add(relative)
+                for dependency_name, specification in poetry:
+                    add_direct(
+                        "python",
+                        dependency_name,
+                        _package_spec_is_pinned(specification),
+                    )
+        elif name == "poetry.lock":
+            valid, entries = _read_poetry_lock(path)
+            if valid:
+                manifests.add(relative)
+                for dependency_name in entries:
+                    add_transitive("python", dependency_name)
+        elif name == "uv.lock":
+            valid, entries = _read_uv_lock(path)
+            if valid:
+                manifests.add(relative)
+                for dependency_name in entries:
+                    add_transitive("python", dependency_name)
+        elif name == "pipfile":
+            declarations, valid = _pipfile_dependency_declarations(path)
+            if valid:
+                manifests.add(relative)
+                for dependency_name, specification in declarations:
+                    add_direct(
+                        "python",
+                        dependency_name,
+                        _package_spec_is_pinned(specification),
+                    )
+        elif name == "pipfile.lock":
+            valid, entries = _read_pipfile_lock(path)
+            if valid:
+                manifests.add(relative)
+                for dependency_name in entries:
+                    add_transitive("python", dependency_name)
         elif name == "package.json":
             try:
                 parsed = json.loads(path.read_text(encoding="utf-8"))
@@ -722,7 +1088,15 @@ def _dependency_lock_hash(nodes: list[FileHashNode]) -> str | None:
         if (
             Path(node.path).name.lower().startswith("requirements")
             or Path(node.path).name.lower()
-            in {"pyproject.toml", "cargo.lock", "package-lock.json"}
+            in {
+                "pyproject.toml",
+                "poetry.lock",
+                "uv.lock",
+                "pipfile",
+                "pipfile.lock",
+                "cargo.lock",
+                "package-lock.json",
+            }
             or Path(node.path).name.lower().startswith("dockerfile")
         )
     ]

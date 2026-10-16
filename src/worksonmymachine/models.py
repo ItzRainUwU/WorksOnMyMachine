@@ -107,6 +107,12 @@ class DockerfilePatchResult(_StrictModel):
     after_content: str = ""
     unified_diff: str = ""
     apt_packages: list[str] = Field(default_factory=list)
+    # Generic package metadata for non-Debian Dockerfiles.  ``apt_packages``
+    # remains the backwards-compatible parser vocabulary; ``packages`` is the
+    # manager-specific recommendation list.
+    package_manager: str | None = None
+    packages: list[str] = Field(default_factory=list)
+    install_command: str = ""
     security_fixes: list[str] = Field(default_factory=list)
     staged_output_path: str | None = None
 
@@ -114,6 +120,15 @@ class DockerfilePatchResult(_StrictModel):
     @classmethod
     def _sort_patch_packages(cls, value: list[str] | None) -> list[str]:
         """Keep Dockerfile package layers reproducible."""
+
+        if value is None:
+            return []
+        return sorted({str(package).strip() for package in value if str(package).strip()})
+
+    @field_validator("packages", mode="before")
+    @classmethod
+    def _sort_generic_packages(cls, value: list[str] | None) -> list[str]:
+        """Keep manager-specific package output deterministic."""
 
         if value is None:
             return []

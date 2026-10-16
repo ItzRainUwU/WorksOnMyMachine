@@ -25,7 +25,12 @@ from .scanner import (
     readiness_score,
     scan_repository,
 )
-from .apt_healer import analyze_log_hybrid, heal_dockerfile, parse_compiler_log
+from .apt_healer import (
+    analyze_log_hybrid,
+    detect_dockerfile_distro,
+    heal_dockerfile,
+    parse_compiler_log,
+)
 from .repro_hash import (
     calculate_dependency_lock_score,
     dependency_telemetry,
@@ -55,6 +60,7 @@ __all__ = [
     "readiness_score",
     "scan_repository",
     "analyze_log_hybrid",
+    "detect_dockerfile_distro",
     "heal_dockerfile",
     "parse_compiler_log",
     "calculate_dependency_lock_score",

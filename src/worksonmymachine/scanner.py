@@ -12,6 +12,7 @@ import ast
 from collections import Counter
 from dataclasses import dataclass
 import difflib
+import json
 import os
 from pathlib import Path, PurePosixPath
 import posixpath
@@ -20,7 +21,8 @@ import shutil
 import stat
 import subprocess
 import tempfile
-from typing import Iterable, Sequence
+import tomllib
+from typing import Any, Iterable, Sequence
 
 from .apt_healer import heal_dockerfile
 from .config import workspace_config
@@ -94,6 +96,10 @@ _JS_ENV = re.compile(
     r"\[\s*['\"](?P<bracket>[A-Za-z_][A-Za-z0-9_]*)['\"]\s*\])"
 )
 _DOCKER_SHELL_REF = re.compile(r"(?P<path>(?:\.?\.?/)?[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*\.sh)")
+_EXACT_PYTHON_VERSION = re.compile(
+    r"^\s*(?:===|==)?\s*v?\d+(?:\.\d+)+(?:[-+][A-Za-z0-9.-]+)?\s*$"
+)
+_PYTHON_REQUIREMENT_NAME = re.compile(r"^\s*([A-Za-z0-9_.-]+)")
 
 
 @dataclass(frozen=True)
@@ -110,6 +116,16 @@ class _TextReplacement:
     start: int
     end: int
     replacement: str
+
+
+@dataclass(frozen=True)
+class _PythonDependency:
+    """One dependency declaration found in a Python packaging manifest."""
+
+    name: str
+    specification: str
+    source: str
+    pinned: bool
 
 
 def _iter_files(root: Path) -> list[Path]:
@@ -614,6 +630,297 @@ def _append_missing_env_issue(
         )
 
 
+def _python_dependency_name(value: str) -> str:
+    match = _PYTHON_REQUIREMENT_NAME.match(value)
+    if match is None:
+        return ""
+    return match.group(1).lower().replace("_", "-")
+
+
+def _pep621_dependency_is_pinned(value: str) -> bool:
+    """Return whether a PEP 508 requirement has an exact version pin."""
+
+    name = _python_dependency_name(value)
+    if not name:
+        return False
+    match = re.match(r"^\s*[A-Za-z0-9_.-]+(?:\[[^\]]+\])?(?P<rest>.*)$", value)
+    remainder = match.group("rest") if match else ""
+    return bool(re.match(r"\s*(?:===|==)\s*[^=\s,;*]+", remainder))
+
+
+def _poetry_dependency_is_pinned(value: Any) -> bool:
+    """Return whether a Poetry dependency identifies an immutable version/source."""
+
+    if isinstance(value, str):
+        return bool(_EXACT_PYTHON_VERSION.fullmatch(value))
+    if not isinstance(value, dict):
+        return False
+    version = value.get("version")
+    if isinstance(version, str) and _EXACT_PYTHON_VERSION.fullmatch(version):
+        return True
+    # A git revision and a local path are immutable enough to be useful local
+    # evidence. Branches, tags, and bare URLs intentionally remain floating.
+    if isinstance(value.get("rev"), str) and value["rev"].strip():
+        return True
+    if isinstance(value.get("path"), str) and value["path"].strip():
+        return True
+    if (
+        isinstance(value.get("url"), str)
+        and value["url"].strip()
+        and isinstance(value.get("hash"), str)
+        and value["hash"].strip()
+    ):
+        return True
+    return False
+
+
+def _poetry_dependency_specification(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if not isinstance(value, dict):
+        return str(value)
+    for key in ("version", "rev", "path", "url", "git"):
+        item = value.get(key)
+        if isinstance(item, str) and item.strip():
+            return f"{key}={item}"
+    return ", ".join(f"{key}={value[key]}" for key in sorted(value))
+
+
+def _pyproject_dependencies(parsed: dict[str, Any]) -> list[_PythonDependency]:
+    """Extract PEP 621, PEP 735, and Poetry declarations from TOML data."""
+
+    dependencies: list[_PythonDependency] = []
+    project = parsed.get("project")
+    if isinstance(project, dict):
+        raw_dependencies = project.get("dependencies", [])
+        if isinstance(raw_dependencies, list):
+            for value in raw_dependencies:
+                if not isinstance(value, str):
+                    continue
+                name = _python_dependency_name(value)
+                if name:
+                    dependencies.append(
+                        _PythonDependency(
+                            name,
+                            value,
+                            "project.dependencies",
+                            _pep621_dependency_is_pinned(value),
+                        )
+                    )
+        optional = project.get("optional-dependencies", {})
+        if isinstance(optional, dict):
+            for group, values in sorted(optional.items(), key=lambda item: str(item[0])):
+                if not isinstance(values, list):
+                    continue
+                for value in values:
+                    if not isinstance(value, str):
+                        continue
+                    name = _python_dependency_name(value)
+                    if name:
+                        dependencies.append(
+                            _PythonDependency(
+                                name,
+                                value,
+                                f"project.optional-dependencies.{group}",
+                                _pep621_dependency_is_pinned(value),
+                            )
+                        )
+
+    # PEP 735 dependency groups use the same PEP 508 string syntax. They are
+    # included when present but do not make arbitrary tool-only TOML Python.
+    groups = parsed.get("dependency-groups")
+    if isinstance(groups, dict):
+        for group, values in sorted(groups.items(), key=lambda item: str(item[0])):
+            if not isinstance(values, list):
+                continue
+            for value in values:
+                if not isinstance(value, str):
+                    continue
+                name = _python_dependency_name(value)
+                if name:
+                    dependencies.append(
+                        _PythonDependency(
+                            name,
+                            value,
+                            f"dependency-groups.{group}",
+                            _pep621_dependency_is_pinned(value),
+                        )
+                    )
+
+    tool = parsed.get("tool")
+    poetry = tool.get("poetry") if isinstance(tool, dict) else None
+    if isinstance(poetry, dict):
+        tables: list[tuple[str, Any]] = []
+        for key in ("dependencies", "dev-dependencies"):
+            tables.append((f"tool.poetry.{key}", poetry.get(key)))
+        groups = poetry.get("group")
+        if isinstance(groups, dict):
+            for group, group_table in sorted(groups.items(), key=lambda item: str(item[0])):
+                if isinstance(group_table, dict):
+                    tables.append(
+                        (
+                            f"tool.poetry.group.{group}.dependencies",
+                            group_table.get("dependencies"),
+                        )
+                    )
+        for source, table in tables:
+            if not isinstance(table, dict):
+                continue
+            for raw_name, value in sorted(table.items(), key=lambda item: str(item[0])):
+                name = str(raw_name).lower().replace("_", "-")
+                # Poetry's python constraint selects the interpreter and is not
+                # a package dependency that needs a lock entry.
+                if name == "python" or not _PYTHON_REQUIREMENT_NAME.fullmatch(name):
+                    continue
+                dependencies.append(
+                    _PythonDependency(
+                        name,
+                        _poetry_dependency_specification(value),
+                        source,
+                        _poetry_dependency_is_pinned(value),
+                    )
+                )
+
+    unique: dict[tuple[str, str], _PythonDependency] = {}
+    for dependency in dependencies:
+        unique.setdefault((dependency.name, dependency.specification), dependency)
+    return list(unique.values())
+
+
+def _valid_requirements_lock(path: Path) -> bool:
+    """Validate a simple local requirements lock without invoking pip."""
+
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return False
+    saw_entry = False
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#") or line.startswith(("-", "--")):
+            continue
+        match = re.match(
+            r"^[A-Za-z0-9_.-]+(?:\[[^\]]+\])?\s*==\s*[^=\s,;]+(?:\s+#.*)?$",
+            line,
+        )
+        if match is None:
+            return False
+        saw_entry = True
+    return saw_entry
+
+
+def _valid_python_lock(path: Path) -> bool:
+    """Check the local shape of recognized Python lockfiles only."""
+
+    name = path.name.lower()
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return False
+    if name == "pipfile.lock":
+        try:
+            parsed = json.loads(text)
+        except (UnicodeError, json.JSONDecodeError):
+            return False
+        return bool(
+            isinstance(parsed, dict)
+            and isinstance(parsed.get("_meta"), dict)
+            and any(isinstance(parsed.get(section), dict) for section in ("default", "develop"))
+        )
+    try:
+        parsed = tomllib.loads(text)
+    except (tomllib.TOMLDecodeError, UnicodeError):
+        return False
+    packages = parsed.get("package")
+    if not isinstance(packages, list) or not packages:
+        return False
+    for package in packages:
+        if not isinstance(package, dict) or not isinstance(package.get("name"), str):
+            return False
+        if name == "poetry.lock" and not isinstance(package.get("version"), str):
+            return False
+    if name == "uv.lock" and not isinstance(parsed.get("version"), int):
+        return False
+    return True
+
+
+def _scan_pyproject(target: Path, path: Path, issues: list[LandmineIssue]) -> None:
+    """Inspect recognized Python packaging declarations and nearby lockfiles."""
+
+    try:
+        parsed = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError):
+        return
+    if not isinstance(parsed, dict):
+        return
+    # ``pyproject.toml`` is also used as metadata for native Cargo projects
+    # built with maturin. Their Python-facing metadata is not an independent
+    # install manifest, and Cargo.lock is the lock evidence handled elsewhere.
+    # Skipping this combination avoids reporting Python lock findings for a
+    # non-Python repository while still scanning standalone PEP 621 projects.
+    build_system = parsed.get("build-system")
+    backend = build_system.get("build-backend") if isinstance(build_system, dict) else ""
+    if (
+        isinstance(backend, str)
+        and "maturin" in backend.lower()
+        and (path.parent / "Cargo.toml").is_file()
+    ):
+        return
+    dependencies = _pyproject_dependencies(parsed)
+    if not dependencies:
+        # A pyproject containing only tool configuration is common in non-
+        # Python repositories; do not invent dependency or lock findings.
+        return
+    for dependency in dependencies:
+        if dependency.pinned:
+            continue
+        issues.append(
+            _issue(
+                target,
+                path,
+                "PYPROJECT-UNPINNED",
+                "UNPINNED_DEPENDENCY",
+                f"Python dependency '{dependency.name}' in {dependency.source} is not pinned to an exact version.",
+                SeverityLevel.MEDIUM,
+                remediation="Pin the dependency to an exact version (for example, ==1.2.3).",
+                evidence=[dependency.specification],
+            )
+        )
+
+    lock_names = ("poetry.lock", "uv.lock", "Pipfile.lock", "requirements.lock")
+    lock_path = next(
+        (path.parent / name for name in lock_names if (path.parent / name).is_file()),
+        None,
+    )
+    if lock_path is None:
+        issues.append(
+            _issue(
+                target,
+                path,
+                "PYPROJECT-LOCK-MISSING",
+                "DEPENDENCY_LOCK",
+                "Python dependencies are declared in pyproject.toml but no recognized lockfile is present.",
+                SeverityLevel.MEDIUM,
+                remediation="Generate and commit poetry.lock, uv.lock, Pipfile.lock, or requirements.lock.",
+                evidence=list(lock_names),
+            )
+        )
+    elif not _valid_python_lock(lock_path):
+        relative_lock = _relative(target, lock_path)
+        issues.append(
+            _issue(
+                target,
+                lock_path,
+                "PYPROJECT-LOCK-INVALID",
+                "DEPENDENCY_LOCK",
+                f"Recognized Python lockfile '{relative_lock}' has an invalid or incomplete local structure.",
+                SeverityLevel.MEDIUM,
+                remediation="Regenerate the lockfile with the project package manager and commit it.",
+                evidence=[relative_lock],
+            )
+        )
+
+
 def _scan_requirements(target: Path, path: Path, issues: list[LandmineIssue]) -> None:
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
@@ -643,6 +950,86 @@ def _scan_requirements(target: Path, path: Path, issues: list[LandmineIssue]) ->
                 line_number=number,
                 remediation="Pin the dependency with an exact == version.",
                 evidence=[raw],
+            )
+        )
+
+
+def _git_index_shell_modes(target: Path) -> list[tuple[str, str]]:
+    """Return ``(target-relative path, Git mode)`` for tracked shell files.
+
+    Git stores executable state in its index, while Windows filesystem mode
+    bits are generally unavailable or synthetic. The command is read-only;
+    failures (including a non-Git target or an unavailable Git executable) are
+    deliberately treated as no metadata rather than scanner errors.
+    """
+
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(target),
+                "ls-files",
+                "--stage",
+                "--",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if result.returncode != 0:
+        return []
+
+    entries: list[tuple[str, str]] = []
+    for raw_line in (result.stdout or "").splitlines():
+        if not raw_line.strip():
+            continue
+        metadata, separator, git_path = raw_line.partition("\t")
+        if not separator:
+            continue
+        if git_path.startswith('"') and git_path.endswith('"'):
+            try:
+                decoded_path = ast.literal_eval(git_path)
+            except (SyntaxError, ValueError):
+                decoded_path = git_path
+            if isinstance(decoded_path, str):
+                git_path = decoded_path
+        fields = metadata.split()
+        if len(fields) < 3 or not git_path.lower().endswith(".sh"):
+            continue
+        if git_path:
+            entries.append((git_path, fields[0]))
+    return entries
+
+
+def _scan_tracked_shell_modes(
+    target: Path, issues: list[LandmineIssue], scanned_files: set[str]
+) -> None:
+    for relative, mode in _git_index_shell_modes(target):
+        try:
+            executable = bool(int(mode, 8) & 0o111)
+        except ValueError:
+            continue
+        if executable:
+            continue
+        if relative not in scanned_files:
+            # A deleted index entry is not a shell script in the scanned
+            # working tree and should not produce a finding.
+            continue
+        path = target / Path(*PurePosixPath(relative).parts)
+        issues.append(
+            _issue(
+                target,
+                path,
+                "SHELL-NOT-EXECUTABLE",
+                "EXEC_PERMISSIONS",
+                f"Tracked shell script has Git index mode {mode} without an execute bit.",
+                SeverityLevel.MEDIUM,
+                remediation=f"Run git update-index --chmod=+x {relative}",
+                evidence=[f"{relative} mode {mode}"],
             )
         )
 
@@ -678,23 +1065,6 @@ def _scan_shell(target: Path, path: Path, issues: list[LandmineIssue]) -> None:
                 remediation="Add a portable /usr/bin/env shebang.",
             )
         )
-    if os.name != "nt":
-        try:
-            mode = stat.S_IMODE(path.stat().st_mode)
-        except OSError:
-            mode = 0
-        if not mode & 0o111:
-            issues.append(
-                _issue(
-                    target,
-                    path,
-                    "SHELL-NOT-EXECUTABLE",
-                    "EXEC_PERMISSIONS",
-                    "Shell script has no execute bit on this POSIX host.",
-                    SeverityLevel.MEDIUM,
-                    remediation="Mark the copied shell script executable.",
-                )
-            )
 
 
 def _scan_dockerfile(target: Path, path: Path, issues: list[LandmineIssue]) -> None:
@@ -780,10 +1150,15 @@ def scan_repository(target_path: Path) -> list[LandmineIssue]:
             _scan_config(target, path, issues)
         elif suffix == ".sh":
             _scan_shell(target, path, issues)
+        if path.name.lower() == "pyproject.toml":
+            _scan_pyproject(target, path, issues)
         if path.name.lower() == "requirements.txt":
             _scan_requirements(target, path, issues)
         if path.name.lower() == "dockerfile" or path.name.lower().startswith("dockerfile."):
             _scan_dockerfile(target, path, issues)
+    _scan_tracked_shell_modes(
+        target, issues, {_relative(target, path) for path in files}
+    )
     return _sorted_issues(issues)
 
 

@@ -29,6 +29,7 @@ from worksonmymachine.repro_hash import (
     compare_certificates,
     compute_file_hash,
     compute_merkle_root,
+    dependency_telemetry,
     generate_certificate,
     run_full_audit,
 )
@@ -67,6 +68,96 @@ def test_floating_cargo_dependency_counts_against_lock_score(tmp_path: Path) -> 
     )
 
     assert calculate_dependency_lock_score(tmp_path) < 100.0
+
+
+def test_pep621_project_accepts_a_valid_uv_lock(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "fixture"\nversion = "0.1.0"\n'
+        'dependencies = ["requests>=2.31"]\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text(
+        'version = 1\nrevision = 1\nrequires-python = ">=3.11"\n\n'
+        '[[package]]\nname = "requests"\nversion = "2.32.3"\n'
+        'source = { registry = "https://pypi.org/simple" }\n',
+        encoding="utf-8",
+    )
+
+    assert calculate_dependency_lock_score(tmp_path) == 100.0
+
+
+def test_poetry_project_accepts_a_valid_poetry_lock(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.poetry]\nname = "fixture"\nversion = "0.1.0"\n\n'
+        '[tool.poetry.dependencies]\npython = ">=3.11"\nrequests = "^2.31"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "poetry.lock").write_text(
+        '[metadata]\nlock-version = "2.1"\ncontent-hash = "fixture"\n\n'
+        '[[package]]\nname = "requests"\nversion = "2.32.3"\n',
+        encoding="utf-8",
+    )
+
+    assert calculate_dependency_lock_score(tmp_path) == 100.0
+
+
+def test_pipfile_lock_is_validated_and_resolves_direct_packages(tmp_path: Path) -> None:
+    (tmp_path / "Pipfile").write_text(
+        '[packages]\nrequests = ">=2.31"\n', encoding="utf-8"
+    )
+    (tmp_path / "Pipfile.lock").write_text(
+        json.dumps(
+            {
+                "_meta": {"hash": {"sha256": "fixture"}, "pipfile-spec": 6},
+                "default": {
+                    "requests": {
+                        "version": "==2.32.3",
+                        "hashes": ["sha256:fixture"],
+                    }
+                },
+                "develop": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert calculate_dependency_lock_score(tmp_path) == 100.0
+    telemetry = dependency_telemetry(tmp_path)
+    assert "Pipfile" in telemetry.manifests
+    assert "Pipfile.lock" in telemetry.manifests
+    assert telemetry.pinned == 1
+
+
+def test_invalid_modern_python_locks_do_not_claim_reproducibility(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "fixture"\nversion = "0.1.0"\n'
+        'dependencies = ["requests>=2.31"]\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "poetry.lock").write_text("not valid toml =", encoding="utf-8")
+
+    assert calculate_dependency_lock_score(tmp_path) < 100.0
+
+
+def test_invalid_uv_and_pipfile_locks_lower_the_score(tmp_path: Path) -> None:
+    uv_target = tmp_path / "uv"
+    uv_target.mkdir()
+    (uv_target / "pyproject.toml").write_text(
+        '[project]\nname = "fixture"\nversion = "0.1.0"\n'
+        'dependencies = ["requests>=2.31"]\n',
+        encoding="utf-8",
+    )
+    (uv_target / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+
+    pip_target = tmp_path / "pipenv"
+    pip_target.mkdir()
+    (pip_target / "Pipfile").write_text(
+        '[packages]\nrequests = ">=2.31"\n', encoding="utf-8"
+    )
+    (pip_target / "Pipfile.lock").write_text("{}", encoding="utf-8")
+
+    assert calculate_dependency_lock_score(uv_target) < 100.0
+    assert calculate_dependency_lock_score(pip_target) < 100.0
 
 
 def test_merkle_root_is_independent_of_creation_order_and_mtime(tmp_path: Path) -> None:

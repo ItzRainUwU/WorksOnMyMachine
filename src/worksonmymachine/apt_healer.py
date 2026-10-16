@@ -30,9 +30,107 @@ from .models import (
 
 _FIXED_BASE_IMAGE = "python:3.11.9-slim"
 _APT_PACKAGE = re.compile(r"^[a-z0-9][a-z0-9+.-]*$")
+_PACKAGE_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9+_.:@/-]*$")
 _SHELL_REFERENCE = re.compile(
     r"(?P<path>(?:/|\.\.?/)?[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*\.sh)"
 )
+
+
+# ``apt_packages`` is retained as the stable, Debian-oriented vocabulary used
+# by the parser and existing API clients.  Dockerfile healing translates that
+# vocabulary only when the base image gives us a supported package ecosystem.
+# Keeping this table explicit is intentional: a package that is not listed is
+# skipped on a non-Debian image instead of being guessed from a similar name.
+_PACKAGE_MAP: dict[str, dict[str, tuple[str, ...]]] = {
+    "build-essential": {
+        "apt": ("build-essential",),
+        "apk": ("build-base",),
+        "dnf": ("gcc", "gcc-c++", "make"),
+    },
+    "python3-dev": {
+        "apt": ("python3-dev",),
+        "apk": ("python3-dev",),
+        "dnf": ("python3-devel",),
+    },
+    "gcc": {"apt": ("gcc",), "apk": ("gcc",), "dnf": ("gcc",)},
+    "g++": {"apt": ("g++",), "apk": ("g++",), "dnf": ("gcc-c++",)},
+    "libpq-dev": {
+        "apt": ("libpq-dev",),
+        "apk": ("postgresql-dev",),
+        "dnf": ("libpq-devel",),
+    },
+    "libgl1": {
+        "apt": ("libgl1",),
+        "apk": ("mesa-gl",),
+        "dnf": ("mesa-libGL",),
+    },
+    "libglib2.0-0": {
+        "apt": ("libglib2.0-0",),
+        "apk": ("glib",),
+        "dnf": ("glib2",),
+    },
+    "libffi-dev": {
+        "apt": ("libffi-dev",),
+        "apk": ("libffi-dev",),
+        "dnf": ("libffi-devel",),
+    },
+    "pkg-config": {
+        "apt": ("pkg-config",),
+        "apk": ("pkgconf",),
+        "dnf": ("pkgconf-pkg-config",),
+    },
+    "libssl-dev": {
+        "apt": ("libssl-dev",),
+        "apk": ("openssl-dev",),
+        "dnf": ("openssl-devel",),
+    },
+    "cargo": {"apt": ("cargo",), "apk": ("cargo",), "dnf": ("cargo",)},
+    "rustc": {"apt": ("rustc",), "apk": ("rust",), "dnf": ("rust",)},
+    "default-libmysqlclient-dev": {
+        "apt": ("default-libmysqlclient-dev",),
+        "apk": ("mariadb-dev",),
+        "dnf": ("mariadb-connector-c-devel",),
+    },
+    "cmake": {"apt": ("cmake",), "apk": ("cmake",), "dnf": ("cmake",)},
+    "libxml2-dev": {
+        "apt": ("libxml2-dev",),
+        "apk": ("libxml2-dev",),
+        "dnf": ("libxml2-devel",),
+    },
+    "libxmlsec1-dev": {
+        "apt": ("libxmlsec1-dev",),
+        "apk": ("xmlsec-dev",),
+        "dnf": ("xmlsec1-devel",),
+    },
+    "libxslt1-dev": {
+        "apt": ("libxslt1-dev",),
+        "apk": ("libxslt-dev",),
+        "dnf": ("libxslt-devel",),
+    },
+    "portaudio19-dev": {
+        "apt": ("portaudio19-dev",),
+        "apk": ("portaudio-dev",),
+        "dnf": ("portaudio-devel",),
+    },
+    "libsndfile1-dev": {
+        "apt": ("libsndfile1-dev",),
+        "apk": ("libsndfile-dev",),
+        "dnf": ("libsndfile-devel",),
+    },
+}
+
+_DISTRO_TO_MANAGER = {"debian": "apt", "alpine": "apk", "fedora": "dnf"}
+
+
+@dataclass(frozen=True)
+class _DockerStage:
+    """One FROM-to-next-FROM section of a Dockerfile."""
+
+    start: int
+    end: int
+    image: str
+    alias: str | None
+    distro: str | None
 
 
 @dataclass(frozen=True)
@@ -179,6 +277,191 @@ _RULES: tuple[_DiagnosticRule, ...] = (
         "gcc",
     ),
 )
+
+
+_FROM_PATTERN = re.compile(
+    r"^\s*FROM\s+(?P<options>(?:--\S+\s+)*)?(?P<image>\S+)"
+    r"(?:\s+AS\s+(?P<alias>[A-Za-z0-9_.-]+))?\s*(?:#.*)?$",
+    re.IGNORECASE,
+)
+
+
+def _classify_base_image(image: str) -> str | None:
+    """Classify a base image conservatively as Debian, Alpine, or Fedora.
+
+    Official language images inherit Debian unless their tag explicitly names
+    another family.  Custom images and images such as ``scratch`` remain
+    unknown; package installation on those images is unsafe to infer.
+    """
+
+    value = image.strip().lower()
+    if not value or value.startswith("${"):
+        return None
+    value = value.split("@", 1)[0]
+    basename = value.rsplit("/", 1)[-1]
+    image_name, _, tag = basename.partition(":")
+    identity = f"{image_name} {tag}"
+    full_identity = f"{value} {tag}"
+
+    if image_name == "alpine" or re.search(
+        r"(?:^|[/_-])alpine(?:[-_.0-9/:]|$)", full_identity
+    ):
+        return "alpine"
+    if image_name in {
+        "fedora",
+        "rhel",
+        "centos",
+        "centosstream",
+        "rocky",
+        "rockylinux",
+        "alma",
+        "almalinux",
+        "oraclelinux",
+        "amazonlinux",
+    } or re.fullmatch(r"ubi\d*", image_name) or re.search(
+        r"(?:^|[/_-])(fedora|rhel|ubi\d*|centos(?:stream)?|rocky|rockylinux|"
+        r"alma(?:linux)?|almalinux|oraclelinux|amazonlinux)(?:[-_.0-9/:]|$)",
+        full_identity,
+    ):
+        return "fedora"
+    if image_name in {"debian", "ubuntu"} or re.search(
+        r"(?:^|[/_-])(debian|ubuntu|bookworm|bullseye|buster|trixie|sid|"
+        r"stretch|jammy|focal|noble|kinetic|lunar|mantic|xenial|slim)(?:[-_.0-9]|$)",
+        identity,
+    ):
+        return "debian"
+
+    # These official images default to Debian when no Alpine/Fedora marker is
+    # present.  This keeps the established python:3.x behavior compatible.
+    if "/" not in value and image_name in {
+        "python",
+        "node",
+        "golang",
+        "rust",
+        "ruby",
+        "php",
+    }:
+        return "debian"
+    return None
+
+
+def detect_dockerfile_distro(dockerfile: str) -> str | None:
+    """Return the supported distro of a simple Dockerfile's first base image.
+
+    For multi-stage files this returns the first recognized distro.  Healing
+    uses the stage-aware selector below rather than relying on this convenience
+    function, so mixed-stage files do not accidentally inherit this answer.
+    """
+
+    for line in str(dockerfile or "").splitlines():
+        match = _FROM_PATTERN.match(line)
+        if match:
+            distro = _classify_base_image(match.group("image"))
+            if distro is not None:
+                return distro
+    return None
+
+
+def _docker_stages(lines: list[str]) -> list[_DockerStage]:
+    starts: list[tuple[int, str, str | None, str | None]] = []
+    for index, line in enumerate(lines):
+        match = _FROM_PATTERN.match(line.rstrip("\r\n"))
+        if match:
+            image = match.group("image")
+            starts.append(
+                (index, image, match.group("alias"), _classify_base_image(image))
+            )
+    return [
+        _DockerStage(
+            start=index,
+            end=(
+                starts[position + 1][0] - 1
+                if position + 1 < len(starts)
+                else len(lines) - 1
+            ),
+            image=image,
+            alias=alias,
+            distro=distro,
+        )
+        for position, (index, image, alias, distro) in enumerate(starts)
+    ]
+
+
+def _select_package_stage(lines: list[str]) -> _DockerStage | None:
+    """Choose a supported build stage without guessing across mixed stages."""
+
+    stages = _docker_stages(lines)
+    supported = [stage for stage in stages if stage.distro in _DISTRO_TO_MANAGER]
+    if not supported:
+        return None
+
+    def score(stage: _DockerStage) -> int:
+        section = " ".join(lines[stage.start : stage.end + 1]).lower()
+        value = 0
+        if re.search(r"\b(?:pip|pip3|cargo|rustc|npm|yarn|gem)\b", section):
+            value += 3
+        if re.search(r"\b(?:gcc|g\+\+|cc|cmake|make)\b", section):
+            value += 1
+        return value
+
+    # An unknown stage may be a scratch/distroless builder or final image.  Do
+    # not silently select the supported stage unless its build tooling makes
+    # the intended package-install location clear.
+    if len(stages) > 1 and any(
+        stage.distro not in _DISTRO_TO_MANAGER for stage in stages
+    ):
+        candidates = [stage for stage in supported if score(stage)]
+        if len(candidates) == 1:
+            return candidates[0]
+        return None
+    if len({stage.distro for stage in supported}) == 1:
+        candidates = supported
+    else:
+        candidates = []
+        for stage in supported:
+            stage_score = score(stage)
+            if stage_score:
+                candidates.append((stage_score, stage))
+        if not candidates:
+            return None
+        highest = max(score for score, _stage in candidates)
+        best = [stage for score, stage in candidates if score == highest]
+        if len(best) != 1:
+            return None
+        return best[0]
+
+    # Prefer a stage that actually runs the build tooling.  If none does, the
+    # first supported stage is the least surprising single-stage-compatible
+    # behavior, while still avoiding unknown stages.
+    for stage in candidates:
+        if score(stage) >= 3:
+            return stage
+    return candidates[0]
+
+
+def _map_packages(packages: object, manager: str) -> list[str]:
+    """Map parser package vocabulary to one supported manager."""
+
+    source = _normalise_packages(packages)
+    if manager == "apt":
+        return source
+    mapped: set[str] = set()
+    for package in source:
+        mapped.update(_PACKAGE_MAP.get(package, {}).get(manager, ()))
+    return sorted(mapped, key=lambda value: value.lower())
+
+
+def _generic_install_command(manager: str, packages: list[str]) -> str:
+    if not packages:
+        return ""
+    joined = " ".join(packages)
+    if manager == "apt":
+        return "apt-get update && apt-get install -y --no-install-recommends " + joined
+    if manager == "apk":
+        return "apk add --no-cache " + joined
+    if manager == "dnf":
+        return "dnf install -y " + joined + " && dnf clean all"
+    return ""
 
 
 def _normalise_packages(packages: object) -> list[str]:
@@ -400,6 +683,13 @@ def _pin_base_images(lines: list[str]) -> tuple[list[str], bool]:
             output.append(line)
             continue
         last_part = image.rsplit("/", 1)[-1]
+        # Keep the historical deterministic Debian base pin while preserving
+        # Alpine and Fedora/RHEL package ecosystems.  Replacing a non-Debian
+        # image with a Python slim image would silently change the package
+        # manager and libc, so only Debian-family bases use this pin.
+        if _classify_base_image(image) != "debian":
+            output.append(line)
+            continue
         if ":" in last_part:
             tag = last_part.rsplit(":", 1)[1]
         else:
@@ -419,22 +709,36 @@ def _pin_base_images(lines: list[str]) -> tuple[list[str], bool]:
     return output, changed
 
 
-def _apt_blocks(lines: list[str]) -> list[tuple[int, int, set[str]]]:
+def _package_blocks(
+    lines: list[str], manager: str, start: int = 0, end: int | None = None
+) -> list[tuple[int, int, set[str]]]:
+    """Find existing install blocks for one package manager in one stage."""
+
+    if end is None:
+        end = len(lines) - 1
+    if manager == "apt":
+        command = r"apt-get\s+install\b"
+    elif manager == "apk":
+        command = r"apk\s+add\b"
+    elif manager == "dnf":
+        command = r"(?:dnf|yum)\s+install\b"
+    else:
+        return []
     blocks: list[tuple[int, int, set[str]]] = []
-    index = 0
-    while index < len(lines):
+    index = start
+    stage_end = end
+    while index <= stage_end:
         if (
             lines[index].lstrip().startswith("#")
-            or "apt-get" not in lines[index].lower()
-            or "install" not in lines[index].lower()
+            or not re.search(command, lines[index], re.IGNORECASE)
         ):
             index += 1
             continue
-        end = index
-        while lines[end].rstrip().endswith("\\") and end + 1 < len(lines):
-            end += 1
-        joined = " ".join(lines[index : end + 1]).replace("\\", " ")
-        match = re.search(r"apt-get\s+install\b(?P<body>.*?)(?:&&|$)", joined, re.IGNORECASE)
+        block_end = index
+        while block_end < stage_end and lines[block_end].rstrip().endswith("\\"):
+            block_end += 1
+        joined = " ".join(lines[index : block_end + 1]).replace("\\", " ")
+        match = re.search(command + r"(?P<body>.*?)(?:&&|$)", joined, re.IGNORECASE)
         packages: set[str] = set()
         if match:
             try:
@@ -444,21 +748,45 @@ def _apt_blocks(lines: list[str]) -> list[tuple[int, int, set[str]]]:
             packages.update(
                 token
                 for token in tokens
-                if _APT_PACKAGE.fullmatch(token) and not token.startswith("-")
+                if _PACKAGE_TOKEN.fullmatch(token) and not token.startswith("-")
             )
-        blocks.append((index, end, packages))
-        index = end + 1
+        blocks.append((index, block_end, packages))
+        index = block_end + 1
     return blocks
 
 
+def _apt_blocks(lines: list[str]) -> list[tuple[int, int, set[str]]]:
+    """Compatibility wrapper retained for callers of the old private helper."""
+
+    return _package_blocks(lines, "apt")
+
+
 def _render_apt_layer(packages: list[str]) -> list[str]:
+    return _render_install_layer("apt", packages)
+
+
+def _render_install_layer(manager: str, packages: list[str]) -> list[str]:
     if not packages:
         return []
-    rendered = ["RUN apt-get update && apt-get install -y --no-install-recommends \\\n"]
-    for package in packages:
-        rendered.append(f"    {package} \\\n")
-    rendered.append("    && rm -rf /var/lib/apt/lists/*\n")
-    return rendered
+    if manager == "apt":
+        rendered = ["RUN apt-get update && apt-get install -y --no-install-recommends \\\n"]
+        for package in packages:
+            rendered.append(f"    {package} \\\n")
+        rendered.append("    && rm -rf /var/lib/apt/lists/*\n")
+        return rendered
+    if manager == "apk":
+        rendered = ["RUN apk add --no-cache \\\n"]
+        for position, package in enumerate(packages):
+            suffix = " \\\n" if position < len(packages) - 1 else "\n"
+            rendered.append(f"    {package}{suffix}")
+        return rendered
+    if manager == "dnf":
+        rendered = ["RUN dnf install -y \\\n"]
+        for package in packages:
+            rendered.append(f"    {package} \\\n")
+        rendered.append("    && dnf clean all\n")
+        return rendered
+    return []
 
 
 def _install_anchor(lines: list[str]) -> int:
@@ -474,27 +802,40 @@ def _install_anchor(lines: list[str]) -> int:
 
 
 def _inject_apt_layer(lines: list[str], packages: list[str]) -> tuple[list[str], bool]:
-    blocks = _apt_blocks(lines)
+    return _inject_package_layer(lines, packages, "apt")
+
+
+def _inject_package_layer(
+    lines: list[str],
+    packages: list[str],
+    manager: str,
+    start: int = 0,
+    end: int | None = None,
+) -> tuple[list[str], bool]:
+    """Replace or add one deterministic manager-specific install layer."""
+
+    if end is None:
+        end = len(lines) - 1
+    section = lines[start : end + 1]
+    blocks = _package_blocks(section, manager)
     existing = set().union(*(block[2] for block in blocks)) if blocks else set()
-    combined = _normalise_packages([*existing, *packages])
+    combined = sorted({*existing, *packages}, key=lambda value: value.lower())
     if not combined:
         return lines, False
     if blocks:
         removed: list[str] = []
-        block_starts = {index for index, _end, _packages in blocks}
-        block_ends = {end for _index, end, _packages in blocks}
+        block_ranges = {index: block_end for index, block_end, _packages in blocks}
         index = 0
-        while index < len(lines):
-            if index in block_starts:
-                end = next(end for start, end, _packages in blocks if start == index)
-                index = end + 1
+        while index < len(section):
+            if index in block_ranges:
+                index = block_ranges[index] + 1
                 continue
-            removed.append(lines[index])
+            removed.append(section[index])
             index += 1
-        lines = removed
-    anchor = _install_anchor(lines)
-    lines[anchor:anchor] = _render_apt_layer(combined)
-    return lines, True
+        section = removed
+    anchor = _install_anchor(section)
+    section[anchor:anchor] = _render_install_layer(manager, combined)
+    return lines[:start] + section + lines[end + 1 :], True
 
 
 def _chmod_shell_entrypoints(lines: list[str]) -> tuple[list[str], bool, list[str]]:
@@ -533,7 +874,7 @@ def _chmod_shell_entrypoints(lines: list[str]) -> tuple[list[str], bool, list[st
     return output, True, missing
 
 
-def _enforce_appuser(lines: list[str]) -> tuple[list[str], bool]:
+def _enforce_appuser(lines: list[str], distro: str | None = None) -> tuple[list[str], bool]:
     if any(re.match(r"\s*USER\s+appuser\b", line, re.IGNORECASE) for line in lines):
         return lines, False
     workdir = "/app"
@@ -541,9 +882,12 @@ def _enforce_appuser(lines: list[str]) -> tuple[list[str], bool]:
         match = re.match(r"\s*WORKDIR\s+(\S+)", line, re.IGNORECASE)
         if match:
             workdir = match.group(1)
+    if distro == "alpine":
+        create_user = "adduser -D -u 10001 appuser"
+    else:
+        create_user = "useradd -m -u 10001 appuser"
     setup = [
-        "RUN useradd -m -u 10001 appuser && "
-        f"chown -R appuser:appuser {workdir}\n",
+        f"RUN {create_user} && chown -R appuser:appuser {workdir}\n",
         "USER appuser\n",
     ]
     output: list[str] = []
@@ -589,7 +933,7 @@ def _native_and_rust_packages(
     native_indicator = bool(
         re.search(
             r"(?:native extension|build wheels|bindgen|\bcompiler\b|\bbuilding wheel|"
-            r"\b/usr/bin/cc\b|\bgcc\b|\b\.h\b)",
+            r"\b/usr/bin/cc\b|\bgcc\b)",
             combined,
         )
         or any(
@@ -643,9 +987,21 @@ def heal_dockerfile(target_path: Path, output_path: Path | None = None) -> Docke
 
     lines = before.splitlines(keepends=True)
     lines, base_changed = _pin_base_images(lines)
-    lines, apt_changed = _inject_apt_layer(lines, _normalise_packages(packages))
+    stage = _select_package_stage(lines)
+    manager = _DISTRO_TO_MANAGER.get(stage.distro) if stage else None
+    source_packages = _normalise_packages(packages)
+    mapped_packages = _map_packages(source_packages, manager) if manager else []
+    package_changed = False
+    if stage and manager and mapped_packages:
+        lines, package_changed = _inject_package_layer(
+            lines,
+            mapped_packages,
+            manager,
+            stage.start,
+            stage.end,
+        )
     lines, chmod_changed, chmod_refs = _chmod_shell_entrypoints(lines)
-    lines, user_changed = _enforce_appuser(lines)
+    lines, user_changed = _enforce_appuser(lines, stage.distro if stage else None)
     after = "".join(lines)
     staged_dockerfile.write_text(after, encoding="utf-8", newline="")
     _write_staged_entrypoint_modes(output)
@@ -664,9 +1020,14 @@ def heal_dockerfile(target_path: Path, output_path: Path | None = None) -> Docke
     if base_changed:
         changes.append(f"pin floating base image to {_FIXED_BASE_IMAGE}")
         security_fixes.append(f"pinned floating base image to {_FIXED_BASE_IMAGE}")
-    if apt_changed:
-        changes.append(f"install apt packages: {', '.join(_normalise_packages(packages))}")
-        security_fixes.append("clean apt package lists in the deterministic install layer")
+    if package_changed and manager:
+        changes.append(f"install {manager} packages: {', '.join(mapped_packages)}")
+        if manager == "apt":
+            security_fixes.append("clean apt package lists in the deterministic install layer")
+        else:
+            security_fixes.append(
+                f"clean {manager} package metadata in the deterministic install layer"
+            )
     if chmod_changed:
         changes.append("ensure executable shell entrypoints: " + ", ".join(chmod_refs))
         security_fixes.append("shell entrypoints are explicitly executable")
@@ -684,7 +1045,10 @@ def heal_dockerfile(target_path: Path, output_path: Path | None = None) -> Docke
         before_content=before,
         after_content=after,
         unified_diff=unified_diff,
-        apt_packages=_normalise_packages(packages),
+        apt_packages=source_packages,
+        package_manager=manager,
+        packages=mapped_packages,
+        install_command=_generic_install_command(manager or "", mapped_packages),
         security_fixes=sorted(set(security_fixes)),
         staged_output_path=str(output),
     )
@@ -692,6 +1056,7 @@ def heal_dockerfile(target_path: Path, output_path: Path | None = None) -> Docke
 
 __all__ = [
     "analyze_log_hybrid",
+    "detect_dockerfile_distro",
     "heal_dockerfile",
     "parse_compiler_log",
 ]

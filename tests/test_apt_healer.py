@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from worksonmymachine.apt_healer import (
     analyze_log_hybrid,
+    detect_dockerfile_distro,
     heal_dockerfile,
     parse_compiler_log,
 )
@@ -80,6 +81,116 @@ def test_hybrid_analysis_is_offline_by_default(monkeypatch: pytest.MonkeyPatch) 
     assert result.llm_used is False
     assert result.recommended_apt_packages == ["build-essential", "python3-dev"]
     assert "CPython development header" in result.root_cause_summary
+
+
+@pytest.mark.parametrize(
+    ("dockerfile", "distro"),
+    [
+        ("FROM debian:bookworm-slim\n", "debian"),
+        ("FROM ubuntu:24.04\n", "debian"),
+        ("FROM python:3.11-slim\n", "debian"),
+        ("FROM python:3.11-alpine3.20\n", "alpine"),
+        ("FROM alpine:3.20\n", "alpine"),
+        ("FROM fedora:40\n", "fedora"),
+        ("FROM registry.access.redhat.com/ubi9\n", "fedora"),
+        ("FROM scratch\n", None),
+    ],
+)
+def test_dockerfile_base_image_detection_is_conservative(
+    dockerfile: str, distro: str | None
+) -> None:
+    assert detect_dockerfile_distro(dockerfile) == distro
+
+
+def test_alpine_healing_uses_apk_and_explicit_package_mapping(tmp_path: Path) -> None:
+    target = tmp_path / "alpine-target"
+    target.mkdir()
+    (target / "Dockerfile.broken").write_text(
+        "FROM python:3.11-alpine3.20\nWORKDIR /app\nRUN pip install -r requirements.txt\n",
+        encoding="utf-8",
+    )
+    (target / "build_error.log").write_text(
+        "fatal error: Python.h: No such file or directory\n", encoding="utf-8"
+    )
+
+    result = heal_dockerfile(target, tmp_path / "alpine-output")
+
+    assert result.package_manager == "apk"
+    assert result.packages == ["build-base", "python3-dev"]
+    assert result.install_command == "apk add --no-cache build-base python3-dev"
+    assert "RUN apk add --no-cache" in result.after_content
+    assert "apt-get" not in result.after_content
+    assert "dnf install" not in result.after_content
+    assert "adduser -D -u 10001 appuser" in result.after_content
+
+
+def test_fedora_healing_uses_dnf_and_rhel_package_names(tmp_path: Path) -> None:
+    target = tmp_path / "fedora-target"
+    target.mkdir()
+    (target / "Dockerfile.broken").write_text(
+        "FROM fedora:40\nWORKDIR /app\nRUN pip install -r requirements.txt\n",
+        encoding="utf-8",
+    )
+    (target / "build_error.log").write_text(
+        "fatal error: Python.h: No such file or directory\n", encoding="utf-8"
+    )
+
+    result = heal_dockerfile(target, tmp_path / "fedora-output")
+
+    assert result.package_manager == "dnf"
+    assert result.packages == ["gcc", "gcc-c++", "make", "python3-devel"]
+    assert result.install_command == (
+        "dnf install -y gcc gcc-c++ make python3-devel && dnf clean all"
+    )
+    assert "RUN dnf install -y" in result.after_content
+    assert "python3-devel" in result.after_content
+    assert "apt-get" not in result.after_content
+    assert "apk add" not in result.after_content
+
+
+def test_unknown_base_does_not_guess_a_package_manager(tmp_path: Path) -> None:
+    target = tmp_path / "unknown-target"
+    target.mkdir()
+    (target / "Dockerfile.broken").write_text(
+        "FROM scratch\nCOPY app /app\nENTRYPOINT [\"/app\"]\n", encoding="utf-8"
+    )
+    (target / "build_error.log").write_text(
+        "fatal error: Python.h: No such file or directory\n", encoding="utf-8"
+    )
+
+    result = heal_dockerfile(target, tmp_path / "unknown-output")
+
+    assert result.package_manager is None
+    assert result.packages == []
+    assert result.install_command == ""
+    assert all(
+        manager not in result.after_content
+        for manager in ("apt-get", "apk add", "dnf install")
+    )
+
+
+def test_multi_stage_healing_targets_supported_build_stage(tmp_path: Path) -> None:
+    target = tmp_path / "multi-stage-target"
+    target.mkdir()
+    (target / "Dockerfile.broken").write_text(
+        "FROM python:3.11-alpine3.20 AS build\n"
+        "WORKDIR /app\n"
+        "RUN pip install -r requirements.txt\n"
+        "FROM scratch\n"
+        "COPY --from=build /app /app\n"
+        "ENTRYPOINT [\"/app/run\"]\n",
+        encoding="utf-8",
+    )
+    (target / "build_error.log").write_text(
+        "fatal error: Python.h: No such file or directory\n", encoding="utf-8"
+    )
+
+    result = heal_dockerfile(target, tmp_path / "multi-stage-output")
+
+    assert result.package_manager == "apk"
+    assert "RUN apk add --no-cache" in result.after_content
+    assert "FROM scratch" in result.after_content
+    assert "apt-get" not in result.after_content
 
 
 @pytest.mark.parametrize("target_name", ["nightmare_ml_service", "rust_crypto_worker"])

@@ -1,11 +1,13 @@
 """Phase 2 scanner, healer, and API integration tests."""
 
 from pathlib import Path
+import subprocess
 
 import pytest
 from fastapi.testclient import TestClient
 
 from worksonmymachine.app import app
+from worksonmymachine import scanner as scanner_module
 from worksonmymachine.scanner import heal_repository, scan_repository
 
 
@@ -92,6 +94,164 @@ def test_requirements_https_url_is_not_reported_as_a_package(tmp_path: Path) -> 
     assert [
         issue.evidence for issue in issues if issue.category == "UNPINNED_DEPENDENCY"
     ] == [["requests"]]
+
+
+def test_tracked_shell_mode_comes_from_git_index_on_any_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    script = target / "run.sh"
+    script.write_text("#!/bin/sh\necho ready\n", encoding="utf-8")
+
+    calls: list[list[str]] = []
+
+    def fake_git(
+        command: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            "100644 deadbeef 0\trun.sh\n",
+            "",
+        )
+
+    monkeypatch.setattr(scanner_module.subprocess, "run", fake_git)
+
+    issues = scan_repository(target)
+
+    mode_issues = [issue for issue in issues if issue.issue_id == "SHELL-NOT-EXECUTABLE"]
+    assert len(mode_issues) == 1
+    assert mode_issues[0].file_path == "run.sh"
+    assert mode_issues[0].remediation == "Run git update-index --chmod=+x run.sh"
+    assert "100644" in mode_issues[0].evidence[0]
+    assert any("ls-files" in command for command in calls)
+
+
+def test_non_git_target_skips_index_mode_findings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "run.sh").write_text("#!/bin/sh\necho ready\n", encoding="utf-8")
+
+    def unavailable_git(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(command, 128, "", "not a git repository")
+
+    monkeypatch.setattr(scanner_module.subprocess, "run", unavailable_git)
+
+    assert not any(
+        issue.issue_id == "SHELL-NOT-EXECUTABLE" for issue in scan_repository(target)
+    )
+
+
+def test_pep621_pyproject_reports_unpinned_dependencies_and_missing_lock(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "pyproject.toml").write_text(
+        "[project]\n"
+        "name = 'fixture'\n"
+        "dependencies = ['requests>=2.0', 'flask[async]==3.0.3']\n"
+        "[project.optional-dependencies]\n"
+        "dev = ['pytest']\n",
+        encoding="utf-8",
+    )
+
+    issues = scan_repository(target)
+
+    unpinned = [issue for issue in issues if issue.category == "UNPINNED_DEPENDENCY"]
+    assert {item for issue in unpinned for item in issue.evidence} == {
+        "requests>=2.0",
+        "pytest",
+    }
+    lock_issues = [issue for issue in issues if issue.category == "DEPENDENCY_LOCK"]
+    assert len(lock_issues) == 1
+    assert lock_issues[0].issue_id == "PYPROJECT-LOCK-MISSING"
+
+
+def test_poetry_groups_and_uv_lock_are_checked_locally(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "pyproject.toml").write_text(
+        "[tool.poetry]\nname = 'fixture'\nversion = '0.1.0'\n"
+        "[tool.poetry.dependencies]\npython = '>=3.11'\nrequests = '^2.0'\n"
+        "flask = '3.0.3'\n"
+        "[tool.poetry.group.dev.dependencies]\npytest = { version = '>=8.0' }\n",
+        encoding="utf-8",
+    )
+    (target / "uv.lock").write_text(
+        "version = 1\n\n[[package]]\nname = 'requests'\nversion = '2.32.3'\n",
+        encoding="utf-8",
+    )
+
+    issues = scan_repository(target)
+
+    assert {item for issue in issues if issue.category == "UNPINNED_DEPENDENCY" for item in issue.evidence} == {
+        "^2.0",
+        "version=>=8.0",
+    }
+    assert not any(issue.category == "DEPENDENCY_LOCK" for issue in issues)
+
+
+def test_invalid_python_lockfile_is_reported_without_network_access(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "pyproject.toml").write_text(
+        "[project]\nname = 'fixture'\ndependencies = ['requests==2.32.3']\n",
+        encoding="utf-8",
+    )
+    (target / "poetry.lock").write_text("not = 'a package lock'\n", encoding="utf-8")
+
+    issues = scan_repository(target)
+
+    lock_issues = [issue for issue in issues if issue.category == "DEPENDENCY_LOCK"]
+    assert len(lock_issues) == 1
+    assert lock_issues[0].issue_id == "PYPROJECT-LOCK-INVALID"
+
+
+@pytest.mark.parametrize(
+    ("lock_name", "lock_content"),
+    [
+        (
+            "poetry.lock",
+            '[[package]]\nname = "requests"\nversion = "2.32.3"\n',
+        ),
+        (
+            "Pipfile.lock",
+            '{"_meta": {}, "default": {"requests": {"version": "==2.32.3"}}}',
+        ),
+    ],
+)
+def test_recognized_python_lock_variants_are_validated_locally(
+    tmp_path: Path, lock_name: str, lock_content: str
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "pyproject.toml").write_text(
+        "[project]\nname = 'fixture'\ndependencies = ['requests==2.32.3']\n",
+        encoding="utf-8",
+    )
+    (target / lock_name).write_text(lock_content, encoding="utf-8")
+
+    issues = scan_repository(target)
+
+    assert not any(issue.category == "DEPENDENCY_LOCK" for issue in issues)
+
+
+def test_tool_only_pyproject_does_not_create_python_dependency_findings(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "pyproject.toml").write_text(
+        "[tool.ruff]\nline-length = 88\n", encoding="utf-8"
+    )
+
+    assert not any(
+        issue.category in {"UNPINNED_DEPENDENCY", "DEPENDENCY_LOCK"}
+        for issue in scan_repository(target)
+    )
 
 
 def test_python_from_import_checks_imported_module_casing(tmp_path: Path) -> None:

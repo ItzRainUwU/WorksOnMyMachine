@@ -92,8 +92,16 @@ def _resolve_log_input(value: str) -> tuple[str | None, Path]:
         normalized = ""
         parts = ()
     if parts:
-        target_candidate = _resolve_target(normalized)
-        if target_candidate.is_dir():
+        try:
+            target_candidate = _resolve_target(normalized)
+        except click.BadParameter:
+            # A normalized name that is not a target can still be a logfile
+            # in the caller's current directory.  Keep the target error for
+            # missing/invalid paths unless the local file actually exists.
+            if not Path(raw).is_file():
+                raise
+            target_candidate = None
+        if target_candidate is not None and target_candidate.is_dir():
             log_path = target_candidate / "build_error.log"
             if not log_path.is_file():
                 raise click.ClickException(

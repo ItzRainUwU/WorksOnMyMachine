@@ -78,6 +78,77 @@ def test_case_sensitive_scanner_detects_all_unpinned_requirements() -> None:
     assert {"flask>=2.0", "requests*", "numpy"} <= evidence
 
 
+def test_requirements_https_url_is_not_reported_as_a_package(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "requirements.txt").write_text(
+        "https://example.invalid/packages/example-1.0.0-py3-none-any.whl\n"
+        "requests\n",
+        encoding="utf-8",
+    )
+
+    issues = scan_repository(target)
+
+    assert [
+        issue.evidence for issue in issues if issue.category == "UNPINNED_DEPENDENCY"
+    ] == [["requests"]]
+
+
+def test_python_from_import_checks_imported_module_casing(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    package = target / "package"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "module.py").write_text("value = 1\n", encoding="utf-8")
+    source = target / "main.py"
+    source.write_text("from package import Module\n", encoding="utf-8")
+
+    issues = scan_repository(target)
+
+    assert any(
+        issue.category == "CASE_MISMATCH" and "Module -> module" in issue.evidence
+        for issue in issues
+    )
+    output = tmp_path / "healed"
+    result = heal_repository(target, output)
+    assert result.remaining_issues == []
+    assert "from package import module" in (
+        output / "main.py"
+    ).read_text(encoding="utf-8")
+
+
+def test_javascript_directory_import_resolves_typescript_index_case(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    source_dir = target / "src"
+    component_dir = source_dir / "Components"
+    component_dir.mkdir(parents=True)
+    (component_dir / "index.ts").write_text("export const value = 1;\n", encoding="utf-8")
+    (source_dir / "main.js").write_text(
+        'import { value } from "./components";\n', encoding="utf-8"
+    )
+
+    issues = scan_repository(target)
+
+    assert any(
+        issue.category == "CASE_MISMATCH"
+        and "./components" in issue.evidence[0]
+        and "./Components/index.ts" in issue.evidence[0]
+        for issue in issues
+    )
+
+
+def test_healer_does_not_send_nested_dockerfile_to_root_only_healer(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    service = target / "service"
+    service.mkdir(parents=True)
+    (service / "Dockerfile").write_text("FROM python:3.11\n", encoding="utf-8")
+
+    result = heal_repository(target, tmp_path / "healed")
+
+    assert result.remaining_issues == []
+    assert (tmp_path / "healed" / "service" / "Dockerfile").is_file()
+
+
 @pytest.mark.parametrize(
     "target_name",
     ["nightmare_ml_service", "case_sensitive_webapp", "rust_crypto_worker"],

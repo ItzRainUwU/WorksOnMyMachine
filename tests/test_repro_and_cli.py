@@ -176,6 +176,28 @@ def test_cli_scan_parse_log_certify_and_heal_commands() -> None:
     assert '"after_certificate"' in heal_result.output
 
 
+def test_cli_parse_log_accepts_relative_file_in_current_directory(tmp_path: Path) -> None:
+    runner = CliRunner()
+
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        Path("compiler.log").write_text(
+            "fatal error: Python.h: No such file or directory\n",
+            encoding="utf-8",
+        )
+        result = runner.invoke(main, ["parse-log", "compiler.log"])
+
+    assert result.exit_code == 0, result.output
+    assert "Python.h" in result.output
+    assert "python3-dev" in result.output
+
+
+def test_cli_parse_log_keeps_missing_target_error_clear() -> None:
+    result = CliRunner().invoke(main, ["parse-log", "missing-target"])
+
+    assert result.exit_code != 0
+    assert "target not found inside workspace: missing-target" in result.output
+
+
 def test_python_module_help_works_cleanly() -> None:
     environment = os.environ.copy()
     environment["PYTHONPATH"] = str(PROJECT_ROOT / "src")

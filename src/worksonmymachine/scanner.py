@@ -28,6 +28,7 @@ from .models import HealResult, LandmineIssue, SeverityLevel
 
 _SOURCE_SUFFIXES = {".py", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}
 _JS_SUFFIXES = {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".json"}
+_JS_INDEX_SUFFIXES = (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs")
 _CONFIG_SUFFIXES = {".cfg", ".conf", ".ini", ".toml", ".yaml", ".yml"}
 _IGNORED_DIRECTORIES = frozenset(
     {
@@ -307,26 +308,54 @@ def _python_imports(
 
     references: list[tuple[str, str, int, int]] = []
     for node in ast.walk(tree):
-        module = ""
-        level = 0
         if isinstance(node, ast.Import):
-            aliases = [(alias.name, alias) for alias in node.names]
-        elif isinstance(node, ast.ImportFrom):
-            module = node.module or ""
-            level = node.level
-            aliases = [(module, node)] if module else []
-        else:
+            for alias in node.names:
+                typed = alias.name
+                result = _resolve_python_import(target, path, typed, 0)
+                if result is None or not result.mismatch or result.corrected == typed:
+                    continue
+                references.append(
+                    (
+                        typed,
+                        result.corrected,
+                        getattr(alias, "lineno", getattr(node, "lineno", 1)),
+                        getattr(alias, "col_offset", getattr(node, "col_offset", 0)),
+                    )
+                )
             continue
-        for typed, anchor in aliases:
-            result = _resolve_python_import(target, path, typed, level)
-            if result is None or not result.mismatch or result.corrected == typed:
+        if not isinstance(node, ast.ImportFrom):
+            continue
+
+        module = node.module or ""
+        level = node.level
+        if module:
+            result = _resolve_python_import(target, path, module, level)
+            if result is not None and result.mismatch and result.corrected != module:
+                references.append(
+                    (
+                        module,
+                        result.corrected,
+                        getattr(node, "lineno", 1),
+                        getattr(node, "col_offset", 0),
+                    )
+                )
+
+        for alias in node.names:
+            if alias.name == "*":
+                continue
+            imported = f"{module}.{alias.name}" if module else alias.name
+            result = _resolve_python_import(target, path, imported, level)
+            if result is None or not result.mismatch:
+                continue
+            corrected_name = result.corrected.rsplit(".", 1)[-1]
+            if corrected_name == alias.name:
                 continue
             references.append(
                 (
-                    typed,
-                    result.corrected,
-                    getattr(anchor, "lineno", getattr(node, "lineno", 1)),
-                    getattr(anchor, "col_offset", getattr(node, "col_offset", 0)),
+                    alias.name,
+                    corrected_name,
+                    getattr(alias, "lineno", getattr(node, "lineno", 1)),
+                    getattr(alias, "col_offset", getattr(node, "col_offset", 0)),
                 )
             )
     return references
@@ -366,7 +395,13 @@ def _resolve_js_import(source: Path, spec: str) -> _CaseResolution | None:
     if selected.is_dir():
         index_entries = _children(selected)
         index = next(
-            (entry for entry in index_entries if entry.name == "index.js"), None
+            (
+                entry
+                for suffix in _JS_INDEX_SUFFIXES
+                for entry in index_entries
+                if entry.name == f"index{suffix}"
+            ),
+            None,
         )
         if index is None:
             return None
@@ -585,7 +620,11 @@ def _scan_requirements(target: Path, path: Path, issues: list[LandmineIssue]) ->
         return
     for number, raw in enumerate(lines, 1):
         line = raw.strip()
-        if not line or line.startswith("#") or line.startswith(("-", "git+", "http:")):
+        if (
+            not line
+            or line.startswith("#")
+            or line.lower().startswith(("-", "git+", "http:", "https:"))
+        ):
             continue
         body = line.split(" #", 1)[0].strip()
         match = re.match(r"(?P<name>[A-Za-z0-9_.-]+)(?:\[[^\]]+\])?(?P<spec>.*)$", body)
@@ -791,12 +830,16 @@ def _python_import_replacements(target: Path, path: Path, text: str) -> list[_Te
         if line < 1 or line > len(lines):
             continue
         line_text = lines[line - 1]
-        match = re.search(rf"(?<![\w.]){re.escape(typed)}(?![\w.])", line_text)
+        search_start = min(max(_column, 0), len(line_text))
+        match = re.search(
+            rf"(?<![\w.]){re.escape(typed)}(?![\w.])",
+            line_text[search_start:],
+        )
         if match:
             replacements.append(
                 _TextReplacement(
-                    offsets[line - 1] + match.start(),
-                    offsets[line - 1] + match.end(),
+                    offsets[line - 1] + search_start + match.start(),
+                    offsets[line - 1] + search_start + match.end(),
                     corrected,
                 )
             )
@@ -1131,7 +1174,7 @@ def heal_repository(target_path: Path, output_path: Path | None = None) -> HealR
         (
             path
             for path in _iter_files(output)
-            if path.name.lower() in dockerfile_names
+            if path.parent == output and path.name.lower() in dockerfile_names
         ),
         None,
     )

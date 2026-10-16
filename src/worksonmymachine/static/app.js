@@ -853,10 +853,15 @@
     }
     var blob = new Blob([JSON.stringify(certificate, null, 2)], { type: "application/json" });
     var link = document.createElement("a");
-    link.href = URL.createObjectURL(blob);
+    var url = URL.createObjectURL(blob);
+    link.href = url;
     link.download = state.target + "-cleanroom-certificate.json";
+    document.body.appendChild(link);
     link.click();
-    URL.revokeObjectURL(link.href);
+    setTimeout(function () {
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    }, 1000);
     logEvent("certificate JSON downloaded", "success");
   }
 
@@ -934,10 +939,15 @@
   function downloadText(filename, content, type) {
     var blob = new Blob([content], { type: type || "text/plain" });
     var link = document.createElement("a");
-    link.href = URL.createObjectURL(blob);
+    var url = URL.createObjectURL(blob);
+    link.href = url;
     link.download = filename;
+    document.body.appendChild(link);
     link.click();
-    URL.revokeObjectURL(link.href);
+    setTimeout(function () {
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    }, 1000);
     logEvent(filename + " downloaded", "success");
   }
 

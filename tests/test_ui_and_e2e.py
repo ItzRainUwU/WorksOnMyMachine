@@ -81,6 +81,10 @@ def test_dashboard_assets_are_ascii_offline_and_svg_driven() -> None:
     assert "<svg" in index or "<svg" in icons
     assert "stroke-width=\"1.75\"" in icons
     assert "/api/v1/audit" in app_source
+    assert app_source.count("document.body.appendChild(link);") >= 2
+    assert app_source.count("setTimeout(function () {") >= 2
+    assert app_source.count("URL.revokeObjectURL(url);") >= 2
+    assert "URL.revokeObjectURL(link.href);" not in app_source
 
 
 def test_all_demo_targets_complete_scan_parse_docker_and_autoheal_workflow() -> None:

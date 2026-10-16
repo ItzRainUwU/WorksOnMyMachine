@@ -145,6 +145,37 @@ def test_dockerfile_base_image_detection_is_conservative(
     assert detect_dockerfile_distro(dockerfile) == distro
 
 
+@pytest.mark.parametrize(
+    ("source_image", "expected_image"),
+    [
+        ("python:latest", "python:3.11.9-slim"),
+        ("python:3.11", "python:3.11.9-slim"),
+        ("rust:latest", "rust:1.85-slim-bookworm"),
+        ("node:latest", "node:22-bookworm-slim"),
+        ("ubuntu:latest", "ubuntu:24.04"),
+        ("alpine:latest", "alpine:3.20"),
+        ("python:3.11.9-slim", "python:3.11.9-slim"),
+        ("rust:1.85-slim-bookworm", "rust:1.85-slim-bookworm"),
+        ("node:22-bookworm-slim", "node:22-bookworm-slim"),
+        ("ubuntu:24.04", "ubuntu:24.04"),
+        ("alpine:3.20", "alpine:3.20"),
+    ],
+)
+def test_runtime_aware_base_image_pinning(
+    tmp_path: Path, source_image: str, expected_image: str
+) -> None:
+    target = tmp_path / "runtime-target"
+    target.mkdir()
+    (target / "Dockerfile.broken").write_text(
+        f"FROM {source_image}\nCMD [\"python\", \"-c\", \"print(1)\"]\n",
+        encoding="utf-8",
+    )
+
+    result = heal_dockerfile(target, tmp_path / "runtime-output")
+
+    assert result.after_content.splitlines()[0] == f"FROM {expected_image}"
+
+
 def test_alpine_healing_uses_apk_and_explicit_package_mapping(tmp_path: Path) -> None:
     target = tmp_path / "alpine-target"
     target.mkdir()
@@ -260,9 +291,15 @@ def test_multi_stage_healing_targets_supported_build_stage(tmp_path: Path) -> No
     assert "apt-get" not in result.after_content
 
 
-@pytest.mark.parametrize("target_name", ["nightmare_ml_service", "rust_crypto_worker"])
+@pytest.mark.parametrize(
+    ("target_name", "expected_base_image"),
+    [
+        ("nightmare_ml_service", "python:3.11.9-slim"),
+        ("rust_crypto_worker", "rust:1.85-slim-bookworm"),
+    ],
+)
 def test_heal_dockerfile_is_copy_on_write_and_hardens_image(
-    tmp_path: Path, target_name: str
+    tmp_path: Path, target_name: str, expected_base_image: str
 ) -> None:
     target = DEMO_ROOT / target_name
     snapshot = {
@@ -279,7 +316,7 @@ def test_heal_dockerfile_is_copy_on_write_and_hardens_image(
     assert result.before_content
     assert result.after_content == result.patched_content
     assert result.unified_diff.startswith("--- a/Dockerfile.broken")
-    assert "FROM python:3.11.9-slim" in result.after_content
+    assert f"FROM {expected_base_image}" in result.after_content
     assert "RUN apt-get update && apt-get install -y --no-install-recommends" in (
         result.after_content
     )

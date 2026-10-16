@@ -28,7 +28,19 @@ from .models import (
 )
 
 
-_FIXED_BASE_IMAGE = "python:3.11.9-slim"
+# Keep this policy explicit and local to Dockerfile healing.  These tags are
+# deterministic release tags for the supported official images; they are not
+# inferred from a build log or replaced with a cross-runtime fallback.
+_RUNTIME_BASE_IMAGES: dict[str, tuple[str, str]] = {
+    "python": ("debian", "python:3.11.9-slim"),
+    "rust": ("debian", "rust:1.85-slim-bookworm"),
+    "node": ("debian", "node:22-bookworm-slim"),
+    "ubuntu": ("debian", "ubuntu:24.04"),
+    "alpine": ("alpine", "alpine:3.20"),
+}
+# Retain the old private constant for callers that imported it while making
+# Python's policy entry the source of truth for new healing behavior.
+_FIXED_BASE_IMAGE = _RUNTIME_BASE_IMAGES["python"][1]
 _APT_PACKAGE = re.compile(r"^[a-z0-9][a-z0-9+.-]*$")
 _PACKAGE_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9+_.:@/-]*$")
 _SHELL_REFERENCE = re.compile(
@@ -751,25 +763,23 @@ def _pin_base_images(lines: list[str]) -> tuple[list[str], bool]:
             output.append(line)
             continue
         last_part = image.rsplit("/", 1)[-1]
-        # Keep the historical deterministic Debian base pin while preserving
-        # Alpine and Fedora/RHEL package ecosystems.  Replacing a non-Debian
-        # image with a Python slim image would silently change the package
-        # manager and libc, so only Debian-family bases use this pin.
-        if _classify_base_image(image) != "debian":
+        image_name, _, tag = last_part.partition(":")
+        policy = _RUNTIME_BASE_IMAGES.get(image_name.lower())
+        # Only official runtime images participate in this small policy.  In
+        # particular, keep custom images and runtime variants such as
+        # python:3.11-alpine3.20 on their original package ecosystem.
+        if policy is None or _classify_base_image(image) != policy[0]:
             output.append(line)
             continue
-        if ":" in last_part:
-            tag = last_part.rsplit(":", 1)[1]
-        else:
-            tag = ""
         floating = not tag or tag.lower() in {"latest", "stable"}
-        if last_part.lower().startswith("python:") and not re.search(r"\d+\.\d+\.\d+", tag):
+        if image_name.lower() == "python" and not re.search(r"\d+\.\d+\.\d+", tag):
             floating = True
         if not floating:
             output.append(line)
             continue
+        replacement_image = policy[1]
         replacement = (
-            f"{match.group('indent')}{match.group('prefix')}{_FIXED_BASE_IMAGE}"
+            f"{match.group('indent')}{match.group('prefix')}{replacement_image}"
             f"{match.group('tail')}{newline}"
         )
         output.append(replacement)
@@ -1086,8 +1096,8 @@ def heal_dockerfile(target_path: Path, output_path: Path | None = None) -> Docke
     changes: list[str] = []
     security_fixes: list[str] = []
     if base_changed:
-        changes.append(f"pin floating base image to {_FIXED_BASE_IMAGE}")
-        security_fixes.append(f"pinned floating base image to {_FIXED_BASE_IMAGE}")
+        changes.append("pin floating base images using runtime-aware defaults")
+        security_fixes.append("pinned floating base images without changing runtime family")
     if package_changed and manager:
         changes.append(f"install {manager} packages: {', '.join(mapped_packages)}")
         if manager == "apt":

@@ -18,6 +18,7 @@ import posixpath
 import re
 import shutil
 import stat
+import subprocess
 import tempfile
 from typing import Iterable, Sequence
 
@@ -1088,6 +1089,236 @@ def _copy_tree(target: Path, output: Path) -> None:
     )
 
 
+class HealingConflictError(RuntimeError):
+    """Raised when the source changes while a staged healing is prepared."""
+
+
+_SnapshotValue = tuple[str, bytes | str, int]
+
+
+def _snapshot_tree(root: Path) -> dict[str, _SnapshotValue]:
+    """Capture content, type, and mode for a target without following links.
+
+    The snapshot is deliberately independent of timestamps.  Ignored
+    directories are excluded because the copy-on-write healer does not copy
+    them and they cannot be part of an apply operation.
+    """
+
+    snapshot: dict[str, _SnapshotValue] = {}
+
+    def walk(directory: Path, prefix: tuple[str, ...]) -> None:
+        try:
+            entries = sorted(directory.iterdir(), key=lambda item: item.name)
+        except (OSError, ValueError):
+            return
+        for entry in entries:
+            if entry.name in _IGNORED_DIRECTORIES:
+                continue
+            relative = PurePosixPath(*(prefix + (entry.name,))).as_posix()
+            try:
+                if entry.is_symlink():
+                    snapshot[relative] = ("symlink", os.readlink(entry), 0)
+                elif entry.is_dir():
+                    walk(entry, (*prefix, entry.name))
+                elif entry.is_file():
+                    snapshot[relative] = (
+                        "file",
+                        entry.read_bytes(),
+                        stat.S_IMODE(entry.stat().st_mode),
+                    )
+            except OSError:
+                # A disappearing or inaccessible path is represented by the
+                # next snapshot comparison as a conflict rather than being
+                # silently overwritten.
+                snapshot[relative] = ("unreadable", "", 0)
+
+    walk(Path(root), ())
+    return snapshot
+
+
+def _safe_target_path(root: Path, relative: str) -> Path:
+    """Resolve a staged relative path and reject symlink/parent escapes."""
+
+    candidate = (root / Path(*PurePosixPath(relative).parts)).resolve()
+    try:
+        candidate.relative_to(root.resolve())
+    except ValueError as exc:
+        raise HealingConflictError(f"healing path escapes target: {relative}") from exc
+    return candidate
+
+
+def _atomic_write(path: Path, content: bytes, mode: int) -> None:
+    """Write one file atomically in its destination directory."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb", dir=path.parent, prefix=f".{path.name}.worksonmymachine-", delete=False
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+
+
+def _restore_snapshot(path: Path, value: _SnapshotValue | None) -> None:
+    """Restore one path after a failed multi-file apply."""
+
+    if path.is_symlink() or path.exists():
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+    if value is None:
+        return
+    kind, payload, mode = value
+    if kind != "file" or not isinstance(payload, bytes):
+        raise HealingConflictError(f"cannot restore non-regular file: {path}")
+    _atomic_write(path, payload, mode)
+
+
+def _apply_staged_output(
+    target: Path,
+    staged: Path,
+    result: HealResult,
+    expected_snapshot: dict[str, _SnapshotValue],
+) -> HealResult:
+    """Apply a completed staged heal after validating the source snapshot."""
+
+    current_snapshot = _snapshot_tree(target)
+    if current_snapshot != expected_snapshot:
+        raise HealingConflictError(
+            "target changed while healing was prepared; no files were applied"
+        )
+    staged_snapshot = _snapshot_tree(staged)
+    changed = sorted(
+        relative
+        for relative in set(expected_snapshot) | set(staged_snapshot)
+        if expected_snapshot.get(relative) != staged_snapshot.get(relative)
+    )
+
+    prepared: dict[str, tuple[bytes, int]] = {}
+    originals: dict[str, _SnapshotValue | None] = {}
+    for relative in changed:
+        staged_value = staged_snapshot.get(relative)
+        if staged_value is None:
+            # Current healers only add or modify files.  Refusing a deletion
+            # keeps future healer changes from silently deleting user files.
+            raise HealingConflictError(f"healing would delete source file: {relative}")
+        kind, payload, mode = staged_value
+        if kind != "file" or not isinstance(payload, bytes):
+            raise HealingConflictError(
+                f"healing would apply a non-regular path: {relative}"
+            )
+        destination = _safe_target_path(target, relative)
+        if destination.is_symlink() or (destination.exists() and not destination.is_file()):
+            raise HealingConflictError(f"refusing to replace non-regular path: {relative}")
+        prepared[relative] = (payload, mode)
+        originals[relative] = expected_snapshot.get(relative)
+
+    if changed:
+        try:
+            git_status = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(target),
+                    "status",
+                    "--porcelain=v1",
+                    "--untracked-files=all",
+                    "--",
+                    *changed,
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            git_status = None
+        if git_status is not None and git_status.returncode == 0:
+            dirty = [line for line in git_status.stdout.splitlines() if line.strip()]
+            if dirty:
+                raise HealingConflictError(
+                    "refusing to overwrite locally modified files: "
+                    + ", ".join(line[3:].strip() for line in dirty)
+                )
+
+    # Validate once more immediately before the first replacement.  This
+    # closes the normal race between staging and the first write.
+    if _snapshot_tree(target) != expected_snapshot:
+        raise HealingConflictError(
+            "target changed before healing could be applied; no files were applied"
+        )
+
+    applied: list[str] = []
+    try:
+        for relative in changed:
+            destination = _safe_target_path(target, relative)
+            content, mode = prepared[relative]
+            _atomic_write(destination, content, mode)
+            applied.append(relative)
+    except Exception:
+        for relative in reversed(applied):
+            try:
+                _restore_snapshot(_safe_target_path(target, relative), originals[relative])
+            except OSError:
+                pass
+        raise
+
+    return result.model_copy(update={"output_path": str(target)})
+
+
+def apply_heal_result(target_path: Path, result: HealResult) -> HealResult:
+    """Safely apply a previously staged :class:`HealResult`.
+
+    The result's staging directory must still exist.  Applying is transactional
+    for all changed regular files and refuses source changes, symlinks, and
+    deletions.  The returned result points at the target after a successful
+    apply; the original result remains unchanged.
+    """
+
+    target = Path(target_path).resolve()
+    staged = Path(result.output_path).resolve()
+    if not target.is_dir() or not staged.is_dir():
+        raise ValueError("target_path and result.output_path must be directories")
+    if target == staged:
+        raise ValueError("result.output_path must be a staging directory")
+    expected_snapshot = _snapshot_tree(target)
+    return _apply_staged_output(target, staged, result, expected_snapshot)
+
+
+def apply_healing(target_path: Path) -> HealResult:
+    """Stage and transactionally apply deterministic repairs to a target.
+
+    This is the explicit mutation primitive used by the CLI's opt-in audit
+    flow.  Normal audits continue to use :func:`heal_repository` on a temporary
+    copy and therefore remain read-only.
+    """
+
+    target = Path(target_path).resolve()
+    if not target.is_dir():
+        raise ValueError("target_path must be a directory")
+    expected_snapshot = _snapshot_tree(target)
+    staging_parent = Path(tempfile.mkdtemp(prefix="worksonmymachine-apply-"))
+    staged = staging_parent / "target"
+    try:
+        result = heal_repository(target, staged)
+        return _apply_staged_output(target, staged, result, expected_snapshot)
+    finally:
+        shutil.rmtree(staging_parent, ignore_errors=True)
+
+
 def _ensure_requirements_lock(output: Path, changed_files: dict[str, tuple[str, str]]) -> None:
     """Create a deterministic local lock companion for a healed requirements file."""
 
@@ -1237,4 +1468,11 @@ def _issue_fingerprint(issue: LandmineIssue) -> tuple[object, ...]:
     )
 
 
-__all__ = ["heal_repository", "readiness_score", "scan_repository"]
+__all__ = [
+    "HealingConflictError",
+    "apply_heal_result",
+    "apply_healing",
+    "heal_repository",
+    "readiness_score",
+    "scan_repository",
+]

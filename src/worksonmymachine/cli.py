@@ -24,10 +24,38 @@ from .exports import (
 )
 from .models import LandmineIssue, ReproducibilityCertificate
 from .repro_hash import generate_certificate, run_full_audit
-from .scanner import readiness_score, scan_repository
+from .scanner import (
+    HealingConflictError,
+    apply_healing,
+    readiness_score,
+    scan_repository,
+)
 
 
 _DRIVE_PATH = re.compile(r"^[A-Za-z]:[\\/]")
+
+
+def _resolve_workspace_root(value: str | Path | None) -> Path:
+    """Resolve an optional caller workspace root.
+
+    With no option the package's historical project root is retained.  An
+    explicit relative path is resolved from the caller's current directory,
+    which is the important distinction for installed GitHub Action and
+    pre-commit entry points.
+    """
+
+    if value is None:
+        return PROJECT_ROOT.resolve()
+    candidate = Path(value).expanduser()
+    if not candidate.is_absolute():
+        candidate = Path.cwd() / candidate
+    try:
+        resolved = candidate.resolve()
+    except OSError as exc:
+        raise click.BadParameter(f"workspace root is not accessible: {value}") from exc
+    if not resolved.is_dir():
+        raise click.BadParameter(f"workspace root is not a directory: {value}")
+    return resolved
 
 
 def _demo_root() -> Path:
@@ -58,14 +86,19 @@ def _validate_relative_target(value: str) -> tuple[str, tuple[str, ...]]:
     return normalized, parts
 
 
-def _resolve_target(value: str) -> Path:
+def _resolve_target(value: str, workspace_root: str | Path | None = None) -> Path:
     """Resolve a fixture or workspace-relative target and reject escapes."""
 
     normalized, parts = _validate_relative_target(value)
-    workspace = PROJECT_ROOT.resolve()
+    workspace = _resolve_workspace_root(workspace_root)
     if normalized == "workspace":
         return workspace
-    candidates = [(_demo_root() / Path(*parts)).resolve(), (workspace / Path(*parts)).resolve()]
+    candidates = [(workspace / Path(*parts)).resolve()]
+    # The package's bundled fixtures remain available under the default
+    # invocation.  A caller-selected root must never fall back to the
+    # installed package directory.
+    if workspace_root is None:
+        candidates.insert(0, (_demo_root() / Path(*parts)).resolve())
     for candidate in candidates:
         try:
             candidate.relative_to(workspace)
@@ -76,7 +109,9 @@ def _resolve_target(value: str) -> Path:
     raise click.BadParameter(f"target not found inside workspace: {normalized}")
 
 
-def _resolve_log_input(value: str) -> tuple[str | None, Path]:
+def _resolve_log_input(
+    value: str, workspace_root: str | Path | None = None
+) -> tuple[str | None, Path]:
     """Resolve a target-backed build log or a directly supplied logfile."""
 
     raw = value.strip()
@@ -93,7 +128,7 @@ def _resolve_log_input(value: str) -> tuple[str | None, Path]:
         parts = ()
     if parts:
         try:
-            target_candidate = _resolve_target(normalized)
+            target_candidate = _resolve_target(normalized, workspace_root)
         except click.BadParameter:
             # A normalized name that is not a target can still be a logfile
             # in the caller's current directory.  Keep the target error for
@@ -180,9 +215,33 @@ def _apt_install_command(packages: list[str]) -> str:
     )
 
 
-def _baseline_path(value: str | None) -> Path:
+def _baseline_path(
+    value: str | None, workspace_root: str | Path | None = None
+) -> Path:
     path = Path(value or workspace_config.baseline_file)
-    return path if path.is_absolute() else PROJECT_ROOT / path
+    return path if path.is_absolute() else _resolve_workspace_root(workspace_root) / path
+
+
+def _default_target(workspace_root: str | Path | None) -> str:
+    """Choose the default target without redirecting explicit roots."""
+
+    if workspace_root is not None:
+        return "workspace"
+    return workspace_config.target_paths[0]
+
+
+def _confirm_apply(yes: bool) -> None:
+    """Require an explicit confirmation before mutating a source repository."""
+
+    if yes:
+        return
+    stdin = click.get_text_stream("stdin")
+    if not getattr(stdin, "isatty", lambda: False)():
+        raise click.UsageError(
+            "--apply requires an interactive confirmation or the explicit --yes flag"
+        )
+    if not click.confirm("Apply staged healing changes to the workspace?", default=False):
+        raise click.Abort()
 
 
 def _write_or_echo(payload: str, output: str | None) -> None:
@@ -206,9 +265,35 @@ def _run_audit_command(
     baseline: str | None,
     write_baseline_file: bool,
     require_reproducible: bool,
+    workspace_root: str | Path | None = None,
+    apply: bool = False,
+    yes: bool = False,
 ) -> None:
-    report = run_full_audit(_resolve_target(target), auto_heal=auto_heal)
-    baseline_file = _baseline_path(baseline)
+    if apply and not auto_heal:
+        raise click.UsageError("--auto-heal is required when using --apply")
+    if yes and not apply:
+        raise click.UsageError("--yes is only valid together with --apply")
+
+    target_path = _resolve_target(target, workspace_root)
+    report = run_full_audit(target_path, auto_heal=auto_heal)
+    applied_result = None
+    if apply:
+        _confirm_apply(yes)
+        try:
+            applied_result = apply_healing(target_path)
+        except HealingConflictError as exc:
+            raise click.ClickException(str(exc)) from exc
+        report.timeline.append(
+            {
+                "event": "applied",
+                "issues_found": applied_result.issues_found,
+                "issues_fixed": applied_result.issues_fixed,
+                "readiness_score_before": applied_result.readiness_score_before,
+                "readiness_score_after": applied_result.readiness_score_after,
+                "unified_diff_count": len(applied_result.unified_diffs),
+            }
+        )
+    baseline_file = _baseline_path(baseline, workspace_root)
     baseline_values = load_baseline(baseline_file) if new_only else set()
     effective, suppressed = filter_issues(report.issues, workspace_config, baseline_values, new_only)
     if write_baseline_file:
@@ -236,6 +321,10 @@ def _run_audit_command(
         console.print(f"Readiness score: {score:.2f}/100")
         if suppressed:
             console.print(f"Suppressed or baselined findings: {len(suppressed)}")
+        if applied_result is not None:
+            console.print(
+                f"Applied healing changes: {applied_result.issues_fixed} issue(s) fixed"
+            )
         code = ci_exit_code(report, effective, fail_on, min_readiness, require_reproducible)
         if code:
             raise click.exceptions.Exit(code)
@@ -254,6 +343,23 @@ def main() -> None:
 @main.command("audit")
 @click.argument("target", required=False, default=None)
 @click.option("--auto-heal", is_flag=True, help="Run copy-on-write healing before certification.")
+@click.option(
+    "--apply",
+    is_flag=True,
+    help="Apply staged healing changes after confirmation (requires --auto-heal).",
+)
+@click.option(
+    "--yes",
+    is_flag=True,
+    help="Confirm --apply without an interactive prompt.",
+)
+@click.option(
+    "--workspace-root",
+    "--root",
+    "workspace_root",
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Scan this caller repository instead of the installed package workspace.",
+)
 @click.option("--format", "output_format", type=click.Choice(["text", "json", "sarif", "markdown", "patch"]), default="text", show_default=True)
 @click.option("--output", type=click.Path(dir_okay=False), help="Write the selected artifact to a file.")
 @click.option("--fail-on", type=click.Choice(["critical", "high", "medium", "low"]), help="Fail CI when a finding reaches this severity.")
@@ -265,6 +371,9 @@ def main() -> None:
 def audit_command(
     target: str | None,
     auto_heal: bool,
+    apply: bool,
+    yes: bool,
+    workspace_root: Path | None,
     output_format: str,
     output: str | None,
     fail_on: str | None,
@@ -277,7 +386,7 @@ def audit_command(
     """Run a CI-friendly audit for TARGET or the configured workspace target."""
 
     _run_audit_command(
-        target or workspace_config.target_paths[0],
+        target or _default_target(workspace_root),
         auto_heal,
         output_format,
         output,
@@ -287,12 +396,22 @@ def audit_command(
         baseline,
         write_baseline,
         require_reproducible,
+        workspace_root,
+        apply,
+        yes,
     )
 
 
 @main.command("check")
 @click.argument("target", required=False, default=None)
 @click.option("--auto-heal", is_flag=True)
+@click.option(
+    "--workspace-root",
+    "--root",
+    "workspace_root",
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Scan this caller repository instead of the installed package workspace.",
+)
 @click.option("--format", "output_format", type=click.Choice(["text", "json", "sarif", "markdown", "patch"]), default="text", show_default=True)
 @click.option("--output", type=click.Path(dir_okay=False))
 @click.option("--fail-on", type=click.Choice(["critical", "high", "medium", "low"]))
@@ -304,6 +423,7 @@ def audit_command(
 def check_command(
     target: str | None,
     auto_heal: bool,
+    workspace_root: Path | None,
     output_format: str,
     output: str | None,
     fail_on: str | None,
@@ -316,7 +436,7 @@ def check_command(
     """Run a CI check with the same policy and artifact formats as audit."""
 
     _run_audit_command(
-        target or workspace_config.target_paths[0],
+        target or _default_target(workspace_root),
         auto_heal,
         output_format,
         output,
@@ -326,15 +446,25 @@ def check_command(
         baseline,
         write_baseline,
         require_reproducible,
+        workspace_root,
     )
 
 
 @main.command("scan")
-@click.argument("target")
-def scan(target: str) -> None:
+@click.argument("target", required=False, default=None)
+@click.option(
+    "--workspace-root",
+    "--root",
+    "workspace_root",
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Scan this caller repository instead of the installed package workspace.",
+)
+def scan(target: str | None, workspace_root: Path | None) -> None:
     """Scan TARGET for portability and reproducibility landmines."""
 
-    target_path = _resolve_target(target)
+    target_path = _resolve_target(
+        target or _default_target(workspace_root), workspace_root
+    )
     issues = scan_repository(target_path)
     console = _console()
     _print_issue_table(console, issues)
@@ -343,10 +473,17 @@ def scan(target: str) -> None:
 
 @main.command("parse-log")
 @click.argument("target_or_logfile")
-def parse_log(target_or_logfile: str) -> None:
+@click.option(
+    "--workspace-root",
+    "--root",
+    "workspace_root",
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Resolve target names inside this caller repository.",
+)
+def parse_log(target_or_logfile: str, workspace_root: Path | None) -> None:
     """Parse a demo target build log or a supplied logfile."""
 
-    target_name, log_path = _resolve_log_input(target_or_logfile)
+    target_name, log_path = _resolve_log_input(target_or_logfile, workspace_root)
     try:
         log_text = log_path.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as exc:
@@ -412,13 +549,27 @@ def _print_certificate(
 
 
 @main.command("certify")
-@click.argument("target")
+@click.argument("target", required=False, default=None)
+@click.option(
+    "--workspace-root",
+    "--root",
+    "workspace_root",
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Certify this caller repository instead of the installed package workspace.",
+)
 @click.option("--json", "as_json", is_flag=True, help="Emit the certificate as JSON.")
 @click.option("--output", type=click.Path(dir_okay=False), help="Write the certificate JSON to a file.")
-def certify(target: str, as_json: bool, output: str | None) -> None:
+def certify(
+    target: str | None,
+    workspace_root: Path | None,
+    as_json: bool,
+    output: str | None,
+) -> None:
     """Generate a reproducibility certificate for TARGET."""
 
-    certificate = generate_certificate(_resolve_target(target))
+    certificate = generate_certificate(
+        _resolve_target(target or _default_target(workspace_root), workspace_root)
+    )
     if as_json or output:
         _write_or_echo(certificate.model_dump_json(indent=2) + "\n", output)
         return
@@ -426,12 +577,22 @@ def certify(target: str, as_json: bool, output: str | None) -> None:
 
 
 @main.command("heal")
-@click.argument("target")
+@click.argument("target", required=False, default=None)
+@click.option(
+    "--workspace-root",
+    "--root",
+    "workspace_root",
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Heal a target inside this caller repository.",
+)
 @click.option("--json", "as_json", is_flag=True, help="Emit the audit report as JSON.")
-def heal(target: str, as_json: bool) -> None:
+def heal(target: str | None, workspace_root: Path | None, as_json: bool) -> None:
     """Audit TARGET with copy-on-write healing enabled."""
 
-    report = run_full_audit(_resolve_target(target), auto_heal=True)
+    report = run_full_audit(
+        _resolve_target(target or _default_target(workspace_root), workspace_root),
+        auto_heal=True,
+    )
     if as_json:
         click.echo(report.model_dump_json())
         return

@@ -17,7 +17,14 @@ from .models import (
     ReproducibilityCertificate,
     SeverityLevel,
 )
-from .scanner import heal_repository, readiness_score, scan_repository
+from .scanner import (
+    HealingConflictError,
+    apply_heal_result,
+    apply_healing,
+    heal_repository,
+    readiness_score,
+    scan_repository,
+)
 from .apt_healer import analyze_log_hybrid, heal_dockerfile, parse_compiler_log
 from .repro_hash import (
     calculate_dependency_lock_score,
@@ -41,6 +48,9 @@ __all__ = [
     "LandmineIssue",
     "ReproducibilityCertificate",
     "SeverityLevel",
+    "HealingConflictError",
+    "apply_heal_result",
+    "apply_healing",
     "heal_repository",
     "readiness_score",
     "scan_repository",

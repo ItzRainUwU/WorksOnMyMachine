@@ -1,0 +1,7 @@
+- id: worksonmymachine-check
+  name: WorksOnMyMachine reproducibility check
+  description: Scan the caller repository root for reproducibility landmines.
+  entry: worksonmymachine check --root .
+  language: python
+  pass_filenames: false
+  always_run: true

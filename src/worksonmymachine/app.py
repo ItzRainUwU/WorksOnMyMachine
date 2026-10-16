@@ -11,14 +11,23 @@ import time
 import uuid
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
 from . import __version__
 from .config import PROJECT_ROOT, settings, workspace_config
 from .apt_healer import analyze_log_hybrid, heal_dockerfile
-from .exports import filter_issues, load_baseline, report_with_issues
+from .exports import (
+    certificate_json,
+    filter_issues,
+    load_baseline,
+    markdown_summary,
+    report_json,
+    report_with_issues,
+    sarif_report,
+    unified_patch,
+)
 from .models import (
     CompilerDiagnostic,
     BuildVerification,
@@ -188,7 +197,6 @@ def targets(scope: str = "sandbox") -> dict[str, object]:
         "targets": sorted(set(candidates)),
         "default_target": workspace_config.target_paths[0] if workspace_config.target_paths else "workspace",
     }
-
 
 def _looks_like_repository(directory: Path) -> bool:
     """Return whether a workspace directory looks like a project target."""
@@ -687,3 +695,81 @@ def audit(request: AuditRequest) -> AuditReport:
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/export")
+def export_artifact(
+    target: str = "workspace",
+    format: str = "json",
+    auto_heal: bool = True,
+    download: bool = True,
+) -> Response:
+    """Stream an audit artifact with proper content-disposition and MIME type."""
+
+    try:
+        target_path = _resolve_target(target)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    report = run_full_audit(target_path, auto_heal=auto_heal)
+    effective, suppressed = filter_issues(report.issues, workspace_config)
+    report = report_with_issues(report, effective, suppressed_count=len(suppressed))
+
+    clean_target = target.replace("/", "-").replace("\\", "-")
+    format_clean = format.lower().strip()
+
+    if format_clean == "json":
+        content = report_json(report)
+        media_type = "application/json"
+        filename = f"audit-{clean_target}.json"
+    elif format_clean == "certificate":
+        content = certificate_json(report)
+        media_type = "application/json"
+        filename = f"cleanroom-certificate-{clean_target}.json"
+    elif format_clean == "patch":
+        content = unified_patch(report)
+        media_type = "text/x-diff"
+        filename = f"healed-{clean_target}.patch"
+    elif format_clean == "sarif":
+        content = sarif_report(report)
+        media_type = "application/sarif+json"
+        filename = f"audit-{clean_target}.sarif"
+    elif format_clean in ("markdown", "md"):
+        content = markdown_summary(report)
+        media_type = "text/markdown"
+        filename = f"audit-{clean_target}.md"
+    else:
+        raise HTTPException(status_code=400, detail="unsupported export format")
+
+    headers = {}
+    if download:
+        headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+    return Response(content=content, media_type=media_type, headers=headers)
+
+
+@app.post("/api/v1/save-to-workspace")
+def save_to_workspace(request: TargetRequest) -> dict[str, object]:
+    """Write audit.json, certificate.json, and audit.md directly into the workspace root."""
+
+    try:
+        target_path = _resolve_target(request.target)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    report = run_full_audit(target_path, auto_heal=True)
+    audit_file = PROJECT_ROOT / "audit.json"
+    cert_file = PROJECT_ROOT / "certificate.json"
+    md_file = PROJECT_ROOT / "audit.md"
+    audit_file.write_text(report_json(report), encoding="utf-8")
+    cert_file.write_text(certificate_json(report), encoding="utf-8")
+    md_file.write_text(markdown_summary(report), encoding="utf-8")
+    saved_files = ["audit.json", "certificate.json", "audit.md"]
+    if report.unified_diffs:
+        patch_file = PROJECT_ROOT / "healed.patch"
+        patch_file.write_text(unified_patch(report), encoding="utf-8")
+        saved_files.append("healed.patch")
+    return {
+        "status": "saved",
+        "directory": str(PROJECT_ROOT),
+        "files": saved_files,
+    }

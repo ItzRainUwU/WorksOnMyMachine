@@ -26,6 +26,7 @@ from .models import (
     DockerfilePatchResult,
     FileHashNode,
     LandmineIssue,
+    PostHealVerificationSummary,
     ReproducibilityCertificate,
     SeverityLevel,
 )
@@ -1229,6 +1230,9 @@ def compare_certificates(
         "score_delta": round(
             cert_b.linux_readiness_score - cert_a.linux_readiness_score, 2
         ),
+        "dependency_score_delta": round(
+            cert_b.dependency_lock_score - cert_a.dependency_lock_score, 2
+        ),
         "merkle_match": cert_a.root_hash == cert_b.root_hash,
     }
 
@@ -1244,6 +1248,84 @@ def _compiler_diagnostics(target: Path) -> list[CompilerDiagnostic]:
     if not log_path.is_file():
         return []
     return parse_compiler_log(_read_text(log_path))
+
+
+def _blocking_reasons(certificate: ReproducibilityCertificate) -> list[str]:
+    """Explain failed certification from the after-certificate evidence.
+
+    Every reason comes from an after-scan finding or a concrete certificate
+    value.  This intentionally avoids a catch-all message such as
+    ``"verification failed"`` that cannot tell an API consumer what remains
+    to fix.
+    """
+
+    if certificate.is_cleanroom_certified:
+        return []
+
+    reasons: list[str] = []
+    for issue in certificate.issues:
+        location = ""
+        if issue.file_path:
+            location = f" ({issue.file_path}"
+            if issue.line_number is not None:
+                location += f":{issue.line_number}"
+            location += ")"
+        reasons.append(f"{issue.issue_id}: {issue.message}{location}")
+
+    if certificate.linux_readiness_score < 100.0:
+        reasons.append(
+            "Certificate readiness evidence is "
+            f"{certificate.linux_readiness_score:.2f}/100."
+        )
+    if certificate.dependency_lock_score < 100.0:
+        reasons.append(
+            "Certificate dependency-lock evidence is "
+            f"{certificate.dependency_lock_score:.2f}/100."
+        )
+    if not certificate.dockerfile_hardened:
+        reasons.append("Certificate Dockerfile hardening evidence is false.")
+    if not certificate.verified and not reasons:
+        # This branch should be rare, but the boolean itself is still concrete
+        # evidence and is preferable to inventing a reason.
+        reasons.append("Certificate evidence reports verified=false.")
+
+    return list(dict.fromkeys(reasons))
+
+
+def _post_heal_summary(
+    before: ReproducibilityCertificate,
+    after: ReproducibilityCertificate,
+    heal_result: Any,
+) -> PostHealVerificationSummary:
+    """Compose the explicit before/after contract for an auto-heal audit."""
+
+    drift = compare_certificates(before, after)
+    changed_files = sorted(
+        set(drift["modified_files"])
+        | set(drift["added_files"])
+        | set(drift["removed_files"])
+        | set(drift["line_ending_drifts"])
+    )
+    return PostHealVerificationSummary(
+        before_findings=len(before.issues),
+        fixed_findings=heal_result.issues_fixed,
+        remaining_findings=len(after.issues),
+        changed_files=changed_files,
+        readiness_before=before.linux_readiness_score,
+        readiness_after=after.linux_readiness_score,
+        readiness_delta=round(
+            after.linux_readiness_score - before.linux_readiness_score, 2
+        ),
+        dependency_score_before=before.dependency_lock_score,
+        dependency_score_after=after.dependency_lock_score,
+        dependency_score_delta=round(
+            after.dependency_lock_score - before.dependency_lock_score, 2
+        ),
+        certificate_status=(
+            "certified" if after.is_cleanroom_certified else "not_certified"
+        ),
+        blocking_reasons=_blocking_reasons(after),
+    )
 
 
 def _timeline(
@@ -1292,6 +1374,7 @@ def run_full_audit(target_path: Path, auto_heal: bool = False) -> AuditReport:
     diagnostics = _compiler_diagnostics(target)
     after: ReproducibilityCertificate | None = None
     heal_result: Any = None
+    post_heal_summary: PostHealVerificationSummary | None = None
     patch: DockerfilePatchResult | None = None
     diffs: list[str] = []
     dependency_data = dependency_telemetry(target)
@@ -1301,6 +1384,7 @@ def run_full_audit(target_path: Path, auto_heal: bool = False) -> AuditReport:
         try:
             heal_result = heal_repository(target, staged)
             after = generate_certificate(staged)
+            post_heal_summary = _post_heal_summary(before, after, heal_result)
             dependency_data = dependency_telemetry(staged)
             diffs = list(heal_result.unified_diffs)
             if _dockerfile_paths(target):
@@ -1334,6 +1418,7 @@ def run_full_audit(target_path: Path, auto_heal: bool = False) -> AuditReport:
         compiler_diagnostics=diagnostics,
         timeline=_timeline(before, after, heal_result),
         dependency_telemetry=dependency_data,
+        post_heal_summary=post_heal_summary,
     )
 
 

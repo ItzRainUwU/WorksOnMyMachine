@@ -100,6 +100,16 @@ _EXACT_PYTHON_VERSION = re.compile(
     r"^\s*(?:===|==)?\s*v?\d+(?:\.\d+)+(?:[-+][A-Za-z0-9.-]+)?\s*$"
 )
 _PYTHON_REQUIREMENT_NAME = re.compile(r"^\s*([A-Za-z0-9_.-]+)")
+_WINDOWS_RESERVED_NAMES = frozenset(
+    {
+        "con",
+        "prn",
+        "aux",
+        "nul",
+        *(f"com{number}" for number in range(1, 10)),
+        *(f"lpt{number}" for number in range(1, 10)),
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -140,10 +150,10 @@ def _iter_files(root: Path) -> list[Path]:
             return
         for entry in entries:
             try:
-                # Keep symlinks in staged copies, but never scan through them.
-                # Repair functions write in place and could otherwise write
-                # through a link to a file outside the target tree.
-                if entry.is_symlink():
+                # Keep links in staged copies, but never scan through them.
+                # Junctions/reparse points need the same treatment as symlinks
+                # on Windows because they can lead outside the target tree.
+                if _is_link_like(entry):
                     continue
                 if entry.is_dir() and entry.name not in _IGNORED_DIRECTORIES:
                     walk(entry)
@@ -224,6 +234,109 @@ def _children(directory: Path) -> list[Path]:
         return []
 
 
+def _is_reparse_point(path: Path) -> bool:
+    """Return whether *path* is a Windows reparse point or junction.
+
+    ``Path.is_symlink`` does not identify directory junctions on every Python
+    version, and following one while scanning or copying would cross the
+    repository boundary.  ``Path.is_junction`` is available on newer Python
+    versions; the file-attribute fallback keeps this detectable on older
+    Windows builds without importing platform-specific modules.
+    """
+
+    is_junction = getattr(path, "is_junction", None)
+    if callable(is_junction):
+        try:
+            if is_junction():
+                return True
+        except (OSError, NotImplementedError):
+            return True
+    try:
+        attributes = int(getattr(path.lstat(), "st_file_attributes", 0))
+    except (OSError, NotImplementedError):
+        return False
+    return bool(attributes & 0x400)  # FILE_ATTRIBUTE_REPARSE_POINT
+
+
+def _is_link_like(path: Path) -> bool:
+    """Return whether a path must never be traversed as a directory."""
+
+    try:
+        if path.is_symlink():
+            return True
+    except (OSError, NotImplementedError):
+        return True
+    return _is_reparse_point(path)
+
+
+def _safe_relative_parts(relative: str) -> tuple[str, ...]:
+    """Validate a staged POSIX-relative name before it reaches the OS.
+
+    Staged paths originate from directory enumeration, but an apply result can
+    also be supplied by a caller.  Rejecting alternate separators, drive/UNC
+    syntax, traversal, NULs, and Windows ADS syntax prevents a crafted result
+    from escaping the target or addressing a surprising object on Windows.
+    """
+
+    if not isinstance(relative, str) or not relative or "\x00" in relative:
+        raise HealingConflictError(f"unsafe healing path: {relative!r}")
+    if "\\" in relative or relative.startswith("/"):
+        raise HealingConflictError(f"unsafe healing path: {relative!r}")
+    if re.match(r"^[A-Za-z]:", relative) or relative.startswith("//"):
+        raise HealingConflictError(f"unsafe healing path: {relative!r}")
+    parts = tuple(relative.split("/"))
+    if any(
+        not part
+        or part in {".", ".."}
+        or ":" in part
+        or any(character in part for character in '<>"|?*')
+        or part != part.rstrip(" .")
+        or part.casefold().split(".", 1)[0] in _WINDOWS_RESERVED_NAMES
+        for part in parts
+    ):
+        raise HealingConflictError(f"unsafe healing path: {relative!r}")
+    return parts
+
+
+def _ensure_safe_parent_components(root: Path, path: Path) -> None:
+    """Reject link-like or non-directory components below a target root."""
+
+    root = root.resolve()
+    try:
+        relative = path.relative_to(root)
+    except ValueError as exc:
+        raise HealingConflictError(f"healing path escapes target: {path}") from exc
+    current = root
+    for part in relative.parts[:-1]:
+        current /= part
+        try:
+            if _is_link_like(current):
+                raise HealingConflictError(
+                    f"healing path traverses a link or reparse point: {relative}"
+                )
+            if current.exists() and not current.is_dir():
+                raise HealingConflictError(
+                    f"healing path traverses a non-directory: {relative}"
+                )
+        except OSError as exc:
+            raise HealingConflictError(
+                f"cannot validate healing path component: {relative}"
+            ) from exc
+
+
+def _ensure_no_link_components(path: Path) -> None:
+    """Reject an output path whose existing parent traverses a link."""
+
+    absolute = path.absolute()
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current /= part
+        if _is_link_like(current):
+            raise HealingConflictError(
+                f"path traverses a link or reparse point: {path}"
+            )
+
+
 def _resolve_segments(base: Path, segments: Sequence[str]) -> _CaseResolution | None:
     """Resolve exact/case-folded segments using ``iterdir`` only.
 
@@ -236,7 +349,7 @@ def _resolve_segments(base: Path, segments: Sequence[str]) -> _CaseResolution | 
     corrected: list[str] = []
     mismatch = False
     for segment in segments:
-        entries = _children(current)
+        entries = [entry for entry in _children(current) if not _is_link_like(entry)]
         exact = next((entry for entry in entries if entry.name == segment), None)
         selected = exact
         if selected is None:
@@ -271,7 +384,7 @@ def _resolve_module(base: Path, module: str) -> _CaseResolution | None:
     candidates = [leaf]
     if not leaf.endswith(".py"):
         candidates.append(leaf + ".py")
-    entries = _children(parent_path)
+    entries = [entry for entry in _children(parent_path) if not _is_link_like(entry)]
     exact = next((entry for entry in entries if entry.name in candidates), None)
     selected = exact
     mismatch = bool(parent and parent.mismatch)
@@ -298,7 +411,9 @@ def _python_roots(target: Path) -> list[Path]:
 
     roots = [target]
     roots.extend(
-        entry for entry in _children(target) if entry.is_dir() and not entry.is_symlink()
+        entry
+        for entry in _children(target)
+        if not _is_link_like(entry) and entry.is_dir()
     )
     return roots
 
@@ -1127,6 +1242,30 @@ def scan_repository(target_path: Path) -> list[LandmineIssue]:
     """Scan a repository without executing target code or changing its files."""
 
     target = Path(target_path)
+    try:
+        _ensure_no_link_components(target.parent)
+    except HealingConflictError:
+        return [
+            _issue(
+                target,
+                None,
+                "TARGET-REPARSE-POINT",
+                "input",
+                "Scanner target path traverses a symlink, junction, or reparse point.",
+                SeverityLevel.CRITICAL,
+            )
+        ]
+    if _is_link_like(target):
+        return [
+            _issue(
+                target,
+                None,
+                "TARGET-REPARSE-POINT",
+                "input",
+                "Scanner target must not be a symlink, junction, or reparse point.",
+                SeverityLevel.CRITICAL,
+            )
+        ]
     if not target.is_dir():
         return [
             _issue(
@@ -1344,7 +1483,7 @@ def _repair_env(target: Path, keys: set[str]) -> tuple[str, str]:
     if not keys:
         return "", ""
     path = target / ".env.example"
-    if path.is_symlink():
+    if _is_link_like(path):
         return "", ""
     try:
         before = path.read_text(encoding="utf-8") if path.is_file() else ""
@@ -1448,20 +1587,70 @@ def _collect_env_keys(target: Path) -> set[str]:
 
 
 def _copy_tree(target: Path, output: Path) -> None:
-    if output.is_symlink():
-        output.unlink()
-    elif output.is_dir():
-        shutil.rmtree(output)
-    elif output.is_file():
-        output.unlink()
+    """Copy a target without traversing symlinks or Windows reparse points."""
+
+    _ensure_no_link_components(target.parent)
+    if _is_link_like(target):
+        raise HealingConflictError("target must not be a link or reparse point")
+
+    def remove_entry(path: Path) -> None:
+        if _is_link_like(path):
+            path.unlink()
+            return
+        if path.is_dir():
+            for child in sorted(path.iterdir(), key=lambda item: item.name):
+                remove_entry(child)
+            path.rmdir()
+        elif path.exists():
+            path.unlink()
+
+    _ensure_no_link_components(output.parent)
+    if _is_link_like(output):
+        raise HealingConflictError("output_path must not be a link or reparse point")
+    if output.exists():
+        try:
+            remove_entry(output)
+        except OSError as exc:
+            raise HealingConflictError("cannot safely clear output_path") from exc
     output.parent.mkdir(parents=True, exist_ok=True)
-    # Preserve links rather than copying data from outside the target tree.
-    shutil.copytree(
-        target,
-        output,
-        symlinks=True,
-        ignore=shutil.ignore_patterns(*_IGNORED_DIRECTORIES),
-    )
+
+    def copy_entry(source: Path, destination: Path) -> None:
+        if source.name in _IGNORED_DIRECTORIES:
+            return
+        if _is_link_like(source):
+            # Recreate links without dereferencing them.  A junction may be
+            # exposed as a reparse point rather than a symlink on Windows; a
+            # symlink representation is still safe, and failure is explicit
+            # rather than silently copying data from outside the target.
+            try:
+                link_target = os.readlink(source)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                os.symlink(
+                    link_target,
+                    destination,
+                    target_is_directory=source.is_dir(),
+                )
+            except (OSError, ValueError) as exc:
+                raise HealingConflictError(
+                    f"cannot safely stage link or reparse point: {source}"
+                ) from exc
+            return
+        try:
+            if source.is_dir():
+                destination.mkdir()
+                for child in sorted(source.iterdir(), key=lambda item: item.name):
+                    copy_entry(child, destination / child.name)
+            elif source.is_file():
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, destination, follow_symlinks=False)
+            else:
+                raise HealingConflictError(f"cannot safely stage path: {source}")
+        except OSError as exc:
+            raise HealingConflictError(f"cannot safely stage path: {source}") from exc
+
+    output.mkdir()
+    for entry in sorted(target.iterdir(), key=lambda item: item.name):
+        copy_entry(entry, output / entry.name)
 
 
 class HealingConflictError(RuntimeError):
@@ -1469,6 +1658,7 @@ class HealingConflictError(RuntimeError):
 
 
 _SnapshotValue = tuple[str, bytes | str, int]
+_STAGED_BASELINES: dict[str, dict[str, _SnapshotValue]] = {}
 
 
 def _snapshot_tree(root: Path) -> dict[str, _SnapshotValue]:
@@ -1491,8 +1681,12 @@ def _snapshot_tree(root: Path) -> dict[str, _SnapshotValue]:
                 continue
             relative = PurePosixPath(*(prefix + (entry.name,))).as_posix()
             try:
-                if entry.is_symlink():
-                    snapshot[relative] = ("symlink", os.readlink(entry), 0)
+                if _is_link_like(entry):
+                    try:
+                        link_target = os.readlink(entry)
+                    except OSError:
+                        link_target = ""
+                    snapshot[relative] = ("symlink", link_target, 0)
                 elif entry.is_dir():
                     walk(entry, (*prefix, entry.name))
                 elif entry.is_file():
@@ -1514,18 +1708,41 @@ def _snapshot_tree(root: Path) -> dict[str, _SnapshotValue]:
 def _safe_target_path(root: Path, relative: str) -> Path:
     """Resolve a staged relative path and reject symlink/parent escapes."""
 
-    candidate = (root / Path(*PurePosixPath(relative).parts)).resolve()
+    parts = _safe_relative_parts(relative)
+    if _is_link_like(root):
+        raise HealingConflictError("healing root must not be a link or reparse point")
+    _ensure_no_link_components(root.parent)
+    root = root.resolve()
+    raw_candidate = root / Path(*parts)
+    _ensure_safe_parent_components(root, raw_candidate)
+    if _is_link_like(raw_candidate):
+        raise HealingConflictError(
+            f"healing path is a link or reparse point: {relative}"
+        )
+    candidate = raw_candidate.resolve()
     try:
-        candidate.relative_to(root.resolve())
+        candidate.relative_to(root)
     except ValueError as exc:
         raise HealingConflictError(f"healing path escapes target: {relative}") from exc
-    return candidate
+    _ensure_safe_parent_components(root, candidate)
+    # Retain the non-resolved spelling for the write.  This lets the atomic
+    # writer re-check the actual leaf and parent components instead of writing
+    # through an alias that appeared after the resolution check.
+    return raw_candidate
 
 
-def _atomic_write(path: Path, content: bytes, mode: int) -> None:
+def _atomic_write(
+    path: Path, content: bytes, mode: int, *, root: Path | None = None
+) -> None:
     """Write one file atomically in its destination directory."""
 
+    if root is not None:
+        _ensure_safe_parent_components(root, path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    if root is not None:
+        _ensure_safe_parent_components(root, path)
+    if _is_link_like(path):
+        raise HealingConflictError(f"refusing to replace link or reparse point: {path}")
     temporary: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -1549,11 +1766,13 @@ def _atomic_write(path: Path, content: bytes, mode: int) -> None:
 def _restore_snapshot(path: Path, value: _SnapshotValue | None) -> None:
     """Restore one path after a failed multi-file apply."""
 
-    if path.is_symlink() or path.exists():
-        if path.is_dir() and not path.is_symlink():
-            shutil.rmtree(path)
-        else:
-            path.unlink()
+    _ensure_no_link_components(path.parent)
+    if _is_link_like(path):
+        path.unlink()
+    elif path.exists():
+        if not path.is_file():
+            raise HealingConflictError(f"cannot remove non-regular file: {path}")
+        path.unlink()
     if value is None:
         return
     kind, payload, mode = value
@@ -1581,6 +1800,8 @@ def _apply_staged_output(
         for relative in set(expected_snapshot) | set(staged_snapshot)
         if expected_snapshot.get(relative) != staged_snapshot.get(relative)
     )
+    for relative in changed:
+        _safe_relative_parts(relative)
 
     prepared: dict[str, tuple[bytes, int]] = {}
     originals: dict[str, _SnapshotValue | None] = {}
@@ -1596,7 +1817,9 @@ def _apply_staged_output(
                 f"healing would apply a non-regular path: {relative}"
             )
         destination = _safe_target_path(target, relative)
-        if destination.is_symlink() or (destination.exists() and not destination.is_file()):
+        if _is_link_like(destination) or (
+            destination.exists() and not destination.is_file()
+        ):
             raise HealingConflictError(f"refusing to replace non-regular path: {relative}")
         prepared[relative] = (payload, mode)
         originals[relative] = expected_snapshot.get(relative)
@@ -1635,14 +1858,24 @@ def _apply_staged_output(
         raise HealingConflictError(
             "target changed before healing could be applied; no files were applied"
         )
+    if _snapshot_tree(staged) != staged_snapshot:
+        raise HealingConflictError(
+            "staged output changed before healing could be applied"
+        )
 
     applied: list[str] = []
+    working_snapshot = dict(expected_snapshot)
     try:
         for relative in changed:
+            if _snapshot_tree(target) != working_snapshot:
+                raise HealingConflictError(
+                    "target changed while healing was being applied"
+                )
             destination = _safe_target_path(target, relative)
             content, mode = prepared[relative]
-            _atomic_write(destination, content, mode)
+            _atomic_write(destination, content, mode, root=target)
             applied.append(relative)
+            working_snapshot[relative] = ("file", content, mode)
     except Exception:
         for relative in reversed(applied):
             try:
@@ -1663,14 +1896,42 @@ def apply_heal_result(target_path: Path, result: HealResult) -> HealResult:
     apply; the original result remains unchanged.
     """
 
-    target = Path(target_path).resolve()
-    staged = Path(result.output_path).resolve()
+    raw_target = Path(target_path)
+    if _is_link_like(raw_target):
+        raise ValueError("target_path must not be a link or reparse point")
+    try:
+        _ensure_no_link_components(raw_target.parent)
+    except HealingConflictError as exc:
+        raise ValueError(str(exc)) from exc
+    target = raw_target.resolve()
+    raw_staged = Path(result.output_path)
+    if _is_link_like(raw_staged):
+        raise ValueError("result.output_path must not be a link or reparse point")
+    try:
+        _ensure_no_link_components(raw_staged.parent)
+    except HealingConflictError as exc:
+        raise ValueError(str(exc)) from exc
+    staged = raw_staged.resolve()
     if not target.is_dir() or not staged.is_dir():
         raise ValueError("target_path and result.output_path must be directories")
     if target == staged:
         raise ValueError("result.output_path must be a staging directory")
-    expected_snapshot = _snapshot_tree(target)
-    return _apply_staged_output(target, staged, result, expected_snapshot)
+    try:
+        common = os.path.commonpath(
+            [os.path.normcase(str(target)), os.path.normcase(str(staged))]
+        )
+    except ValueError:
+        common = ""
+    if common == os.path.normcase(str(target)):
+        raise ValueError(
+            "result.output_path must not be the target or one of its descendants"
+        )
+    expected_snapshot = _STAGED_BASELINES.get(str(staged))
+    if expected_snapshot is None:
+        expected_snapshot = _snapshot_tree(target)
+    applied = _apply_staged_output(target, staged, result, expected_snapshot)
+    _STAGED_BASELINES.pop(str(staged), None)
+    return applied
 
 
 def apply_healing(target_path: Path) -> HealResult:
@@ -1681,7 +1942,14 @@ def apply_healing(target_path: Path) -> HealResult:
     copy and therefore remain read-only.
     """
 
-    target = Path(target_path).resolve()
+    raw_target = Path(target_path)
+    if _is_link_like(raw_target):
+        raise ValueError("target_path must not be a link or reparse point")
+    try:
+        _ensure_no_link_components(raw_target.parent)
+    except HealingConflictError as exc:
+        raise ValueError(str(exc)) from exc
+    target = raw_target.resolve()
     if not target.is_dir():
         raise ValueError("target_path must be a directory")
     expected_snapshot = _snapshot_tree(target)
@@ -1689,7 +1957,9 @@ def apply_healing(target_path: Path) -> HealResult:
     staged = staging_parent / "target"
     try:
         result = heal_repository(target, staged)
-        return _apply_staged_output(target, staged, result, expected_snapshot)
+        applied = _apply_staged_output(target, staged, result, expected_snapshot)
+        _STAGED_BASELINES.pop(str(staged.resolve()), None)
+        return applied
     finally:
         shutil.rmtree(staging_parent, ignore_errors=True)
 
@@ -1700,8 +1970,8 @@ def _ensure_requirements_lock(output: Path, changed_files: dict[str, tuple[str, 
     requirements = output / "requirements.txt"
     lock = output / "requirements.lock"
     if (
-        requirements.is_symlink()
-        or lock.is_symlink()
+        _is_link_like(requirements)
+        or _is_link_like(lock)
         or not requirements.is_file()
         or lock.is_file()
     ):
@@ -1723,7 +1993,14 @@ def _ensure_requirements_lock(output: Path, changed_files: dict[str, tuple[str, 
 def heal_repository(target_path: Path, output_path: Path | None = None) -> HealResult:
     """Copy *target_path*, apply safe deterministic repairs, and report the result."""
 
-    target = Path(target_path)
+    raw_target = Path(target_path)
+    if _is_link_like(raw_target):
+        raise ValueError("target_path must not be a link or reparse point")
+    try:
+        _ensure_no_link_components(raw_target.parent)
+    except HealingConflictError as exc:
+        raise ValueError(str(exc)) from exc
+    target = raw_target
     if not target.is_dir():
         raise ValueError("target_path must be a directory")
     output = (
@@ -1731,17 +2008,29 @@ def heal_repository(target_path: Path, output_path: Path | None = None) -> HealR
         if output_path is not None
         else Path(tempfile.mkdtemp(prefix="worksonmymachine-healed-"))
     )
+    try:
+        _ensure_no_link_components(output.parent)
+    except HealingConflictError as exc:
+        raise ValueError(str(exc)) from exc
     target_resolved = target.resolve()
+    if _is_link_like(output):
+        raise ValueError("output_path must not be a link or reparse point")
     output_resolved = output.resolve()
     try:
-        common = os.path.commonpath([str(target_resolved), str(output_resolved)])
+        common = os.path.commonpath(
+            [os.path.normcase(str(target_resolved)), os.path.normcase(str(output_resolved))]
+        )
     except ValueError:
         # Different drives on Windows are safe.
         common = ""
-    if target_resolved == output_resolved or common == str(target_resolved):
+    if output_resolved == target_resolved or common == os.path.normcase(str(target_resolved)):
         raise ValueError("output_path must not be the target or one of its descendants")
 
+    _STAGED_BASELINES.pop(str(output_resolved), None)
+    expected_snapshot = _snapshot_tree(target)
     before_issues = scan_repository(target)
+    if _snapshot_tree(target) != expected_snapshot:
+        raise HealingConflictError("target changed while it was being scanned")
     before_score = readiness_score(before_issues)
     _copy_tree(target, output)
 
@@ -1796,6 +2085,11 @@ def heal_repository(target_path: Path, output_path: Path | None = None) -> HealR
         finally:
             shutil.rmtree(docker_stage, ignore_errors=True)
 
+    if _snapshot_tree(target) != expected_snapshot:
+        raise HealingConflictError(
+            "target changed while healing was being staged; no source files were modified"
+        )
+
     after_issues = scan_repository(output)
     after_score = readiness_score(after_issues)
     remaining_counter = Counter(_issue_fingerprint(issue) for issue in after_issues)
@@ -1820,7 +2114,7 @@ def heal_repository(target_path: Path, output_path: Path | None = None) -> HealR
         )
         if diff:
             diffs.append(diff)
-    return HealResult(
+    result = HealResult(
         output_path=str(output),
         issues_found=len(before_issues),
         issues_fixed=len(fixed),
@@ -1830,6 +2124,10 @@ def heal_repository(target_path: Path, output_path: Path | None = None) -> HealR
         readiness_score_before=before_score,
         readiness_score_after=after_score,
     )
+    if len(_STAGED_BASELINES) >= 128:
+        _STAGED_BASELINES.pop(next(iter(_STAGED_BASELINES)))
+    _STAGED_BASELINES[str(output.resolve())] = expected_snapshot
+    return result
 
 
 def _issue_fingerprint(issue: LandmineIssue) -> tuple[object, ...]:

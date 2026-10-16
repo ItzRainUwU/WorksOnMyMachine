@@ -1,0 +1,74 @@
+name: Cross-platform CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - windows-latest
+          - ubuntu-latest
+          - macos-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up pinned Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+          cache: pip
+          cache-dependency-path: requirements.lock
+
+      - name: Install locked project dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install \
+            --disable-pip-version-check \
+            --no-input \
+            --requirement requirements.txt \
+            --constraint requirements.lock
+
+      - name: Run the offline test suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          # GNU Make is not present on every Windows runner. Both branches
+          # execute the same Makefile test target without adding dependencies.
+          if command -v make >/dev/null 2>&1; then
+            make test
+          else
+            python -m pytest
+          fi
+
+      - name: Check JavaScript syntax when Node.js is available
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v node >/dev/null 2>&1; then
+            echo "Node.js is not available; skipping JavaScript syntax checks."
+            exit 0
+          fi
+
+          checked=0
+          while IFS= read -r -d '' file; do
+            node --check "${file}"
+            checked=$((checked + 1))
+          done < <(git ls-files -z -- '*.js')
+
+          if [[ "${checked}" -eq 0 ]]; then
+            echo "No tracked JavaScript files found."
+          else
+            echo "Checked ${checked} JavaScript file(s)."
+          fi

@@ -159,6 +159,27 @@ def markdown_summary(report: AuditReport) -> str:
         )
     if not report.issues:
         lines.append("| - | - | - | - | - | No findings |")
+    summary = report.post_heal_summary
+    if summary is not None:
+        lines.extend(
+            [
+                "",
+                "## Post-heal verification",
+                "",
+                f"- Findings before healing: **{summary.before_findings}**",
+                f"- Findings fixed: **{summary.fixed_findings}**",
+                f"- Findings remaining: **{summary.remaining_findings}**",
+                f"- Changed files: **{len(summary.changed_files)}**",
+                f"- Readiness delta: **{summary.readiness_delta:+.2f}**",
+                f"- Dependency score delta: **{summary.dependency_score_delta:+.2f}**",
+                f"- Certificate status: **{summary.certificate_status}**",
+            ]
+        )
+        if summary.blocking_reasons:
+            lines.append("- Blocking reasons:")
+            lines.extend(f"  - {reason}" for reason in summary.blocking_reasons)
+        else:
+            lines.append("- Blocking reasons: **none**")
     lines.extend(["", "## Certificate", "", "```json", certificate_json(report).rstrip(), "```", ""])
     return "\n".join(lines)
 

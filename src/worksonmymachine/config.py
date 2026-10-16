@@ -1,10 +1,10 @@
 """Small, dependency-free configuration loader for local and container runs."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import os
 from pathlib import Path
 import tomllib
-from typing import Mapping
+from collections.abc import Mapping
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
@@ -12,6 +12,66 @@ PROJECT_ROOT = PACKAGE_ROOT.parent.parent
 DEFAULT_ENV_FILE = PROJECT_ROOT / ".env"
 DEFAULT_SANDBOX_DIR = Path("demo_targets")
 DEFAULT_WORKSPACE_CONFIG = PROJECT_ROOT / ".worksonmymachine.toml"
+
+_POLICY_FIELDS = frozenset(
+    {
+        "fail_on",
+        "min_readiness",
+        "require_reproducible",
+        "allow_floating_docker_tags",
+        "require_lockfiles",
+    }
+)
+_POLICY_SEVERITIES = frozenset({"low", "medium", "high", "critical"})
+
+
+@dataclass(frozen=True)
+class Policy:
+    """Shared audit gates loaded from the workspace policy table.
+
+    The defaults intentionally match the documented policy example.  Keeping
+    the policy as a standalone immutable value lets the CLI, API, and
+    integrations consume the same validated object without coupling them to
+    TOML parsing details.
+    """
+
+    fail_on: str = "high"
+    min_readiness: float = 95.0
+    require_reproducible: bool = True
+    allow_floating_docker_tags: bool = False
+    require_lockfiles: bool = True
+
+    def __post_init__(self) -> None:
+        """Validate values even when callers construct a policy directly."""
+
+        if not isinstance(self.fail_on, str):
+            raise ValueError("policy.fail_on must be one of low, medium, high, critical")
+        fail_on = self.fail_on.strip().lower()
+        if fail_on not in _POLICY_SEVERITIES:
+            raise ValueError("policy.fail_on must be one of low, medium, high, critical")
+        object.__setattr__(self, "fail_on", fail_on)
+
+        if isinstance(self.min_readiness, bool) or not isinstance(
+            self.min_readiness, (int, float)
+        ):
+            raise ValueError("policy.min_readiness must be a number between 0 and 100")
+        min_readiness = float(self.min_readiness)
+        if not 0.0 <= min_readiness <= 100.0:
+            raise ValueError("policy.min_readiness must be a number between 0 and 100")
+        object.__setattr__(self, "min_readiness", min_readiness)
+
+        for field_name in (
+            "require_reproducible",
+            "allow_floating_docker_tags",
+            "require_lockfiles",
+        ):
+            if not isinstance(getattr(self, field_name), bool):
+                raise ValueError(f"policy.{field_name} must be true or false")
+
+
+# A descriptive alias makes the object discoverable for integrations that use
+# "workspace policy" terminology while retaining the concise public name.
+WorkspacePolicy = Policy
 
 
 @dataclass(frozen=True)
@@ -26,6 +86,7 @@ class WorkspaceConfig:
     vulnerability_database: str | None = None
     baseline_file: str = ".worksonmymachine-baseline.json"
     suppressions: tuple["SuppressionRule", ...] = ()
+    policy: Policy = field(default_factory=Policy)
 
 
 @dataclass(frozen=True)
@@ -147,6 +208,34 @@ def _load_suppressions(value: object) -> tuple[SuppressionRule, ...]:
     return tuple(rules)
 
 
+def policy_from_mapping(value: object) -> Policy:
+    """Validate and construct a policy from a TOML mapping.
+
+    This small boundary helper is intentionally public so integrations can
+    consume policy data from another configuration source while sharing the
+    exact workspace validation rules.
+    """
+
+    if value is None:
+        return Policy()
+    if not isinstance(value, Mapping):
+        raise ValueError("policy must be a TOML table")
+    unknown = sorted(set(value) - _POLICY_FIELDS)
+    if unknown:
+        names = ", ".join(unknown)
+        raise ValueError(f"policy contains unsupported field(s): {names}")
+    try:
+        return Policy(
+            fail_on=value.get("fail_on", "high"),
+            min_readiness=value.get("min_readiness", 95.0),
+            require_reproducible=value.get("require_reproducible", True),
+            allow_floating_docker_tags=value.get("allow_floating_docker_tags", False),
+            require_lockfiles=value.get("require_lockfiles", True),
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"invalid workspace policy: {exc}") from exc
+
+
 def _safe_relative_file(value: object, field_name: str) -> str:
     if not isinstance(value, str):
         raise ValueError(f"{field_name} must be a workspace-relative path")
@@ -177,7 +266,23 @@ def load_workspace_config(path: Path | None = None) -> WorkspaceConfig:
             "baseline_file",
         ),
         suppressions=_load_suppressions(parsed.get("suppressions")),
+        policy=policy_from_mapping(parsed.get("policy")),
     )
+
+
+def load_workspace_policy(path: Path | None = None) -> Policy:
+    """Load only the shared policy from a workspace TOML file.
+
+    Consumers that do not need target or suppression settings can use this
+    helper while preserving one parser and one set of policy defaults.
+    """
+
+    return load_workspace_config(path).policy
+
+
+# Short alias for integrations that refer to this operation simply as loading
+# policy; keep the descriptive function above as the canonical API name.
+load_policy = load_workspace_policy
 
 
 def load_settings(

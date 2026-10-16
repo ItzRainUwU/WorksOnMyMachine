@@ -228,6 +228,39 @@ class DependencyTelemetry(_StrictModel):
     vulnerabilities: list[str] = Field(default_factory=list)
 
 
+class PostHealVerificationSummary(_StrictModel):
+    """Before/after evidence produced by an auto-healed audit.
+
+    The summary is deliberately separate from :class:`AuditReport`'s existing
+    certificate and issue fields.  Consumers that already use those fields can
+    keep doing so, while consumers that need to explain an auto-heal result
+    have one stable, machine-readable object to inspect.
+    """
+
+    before_findings: int = Field(default=0, ge=0)
+    fixed_findings: int = Field(default=0, ge=0)
+    remaining_findings: int = Field(default=0, ge=0)
+    changed_files: list[str] = Field(default_factory=list)
+    readiness_before: float = Field(default=0.0, ge=0.0, le=100.0)
+    readiness_after: float = Field(default=0.0, ge=0.0, le=100.0)
+    readiness_delta: float = 0.0
+    dependency_score_before: float = Field(default=0.0, ge=0.0, le=100.0)
+    dependency_score_after: float = Field(default=0.0, ge=0.0, le=100.0)
+    dependency_score_delta: float = 0.0
+    certificate_status: str = Field(default="not_certified", min_length=1)
+    blocking_reasons: list[str] = Field(default_factory=list)
+
+    @field_validator("changed_files", mode="before")
+    @classmethod
+    def _sort_changed_files(cls, value: list[str] | None) -> list[str]:
+        """Keep paths deterministic and within the report path contract."""
+
+        if value is None:
+            return []
+        normalized = [_relative_posix_path(str(path)) for path in value]
+        return sorted(set(normalized))
+
+
 class AuditReport(_StrictModel):
     """Complete Phase 1 contract for a target audit."""
 
@@ -250,12 +283,25 @@ class AuditReport(_StrictModel):
     dependency_telemetry: DependencyTelemetry = Field(default_factory=DependencyTelemetry)
     suppressed_issue_count: int = Field(default=0, ge=0)
     baseline_applied: bool = False
+    post_heal_summary: PostHealVerificationSummary | None = None
 
     @property
     def timeline_data(self) -> list[dict[str, Any]]:
         """Compatibility alias for consumers using the descriptive name."""
 
         return self.timeline
+
+    @property
+    def healing_summary(self) -> PostHealVerificationSummary | None:
+        """Compatibility alias for callers using the shorter summary name."""
+
+        return self.post_heal_summary
+
+    @property
+    def post_heal_verification(self) -> PostHealVerificationSummary | None:
+        """Readable alias for the explicit post-heal verification object."""
+
+        return self.post_heal_summary
 
     _validate_target = field_validator("target")(_relative_posix_path)
 

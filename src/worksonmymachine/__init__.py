@@ -14,6 +14,7 @@ from .models import (
     HealResult,
     HybridAnalysisResult,
     LandmineIssue,
+    PostHealVerificationSummary,
     ReproducibilityCertificate,
     SeverityLevel,
 )
@@ -40,6 +41,7 @@ from .repro_hash import (
     generate_certificate,
     run_full_audit,
 )
+from .config import Policy, WorkspacePolicy, load_policy, load_workspace_policy
 
 __all__ = [
     "AuditReport",
@@ -51,6 +53,7 @@ __all__ = [
     "HealResult",
     "HybridAnalysisResult",
     "LandmineIssue",
+    "PostHealVerificationSummary",
     "ReproducibilityCertificate",
     "SeverityLevel",
     "HealingConflictError",
@@ -70,5 +73,9 @@ __all__ = [
     "compute_merkle_root",
     "generate_certificate",
     "run_full_audit",
+    "Policy",
+    "WorkspacePolicy",
+    "load_policy",
+    "load_workspace_policy",
     "__version__",
 ]

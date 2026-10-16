@@ -1,5 +1,6 @@
 """Phase 2 scanner, healer, and API integration tests."""
 
+import os
 from pathlib import Path
 import subprocess
 
@@ -8,7 +9,12 @@ from fastapi.testclient import TestClient
 
 from worksonmymachine.app import app
 from worksonmymachine import scanner as scanner_module
-from worksonmymachine.scanner import heal_repository, scan_repository
+from worksonmymachine.scanner import (
+    HealingConflictError,
+    apply_heal_result,
+    heal_repository,
+    scan_repository,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -423,3 +429,212 @@ def test_api_rejects_workspace_escape() -> None:
     )
 
     assert response.status_code == 400
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "../outside.txt",
+        "nested/../../outside.txt",
+        "/absolute.txt",
+        "C:/outside.txt",
+        r"nested\\outside.txt",
+        "nested/file.txt:stream",
+        "nested//file.txt",
+        "nested/./file.txt",
+        "nested/CON.txt",
+        "nested/file.txt.",
+    ],
+)
+def test_apply_rejects_unsafe_relative_names(tmp_path: Path, relative: str) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+
+    with pytest.raises(HealingConflictError):
+        scanner_module._safe_target_path(target, relative)
+
+
+def test_healer_accepts_nested_output_path_without_touching_target(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    source = target / "requirements.txt"
+    source.write_text("requests\n", encoding="utf-8")
+    output = tmp_path / "staging" / "nested" / "healed"
+
+    result = heal_repository(target, output)
+
+    assert output.is_dir()
+    assert (output / "requirements.txt").read_text(encoding="utf-8") == (
+        "requests==2.32.3\n"
+    )
+    assert source.read_text(encoding="utf-8") == "requests\n"
+    assert result.remaining_issues == []
+
+
+def test_healer_rejects_output_parent_symlink_escape(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    outside = tmp_path / "outside"
+    target.mkdir()
+    outside.mkdir()
+    output_parent = tmp_path / "output-link"
+    try:
+        output_parent.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable on this platform")
+
+    with pytest.raises(ValueError, match="link or reparse"):
+        heal_repository(target, output_parent / "nested" / "healed")
+    assert not (outside / "nested").exists()
+
+
+def test_apply_rejects_symlink_parent_even_when_it_points_inside_target(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target"
+    staged = tmp_path / "staged"
+    target.mkdir()
+    staged.mkdir()
+    (target / "real").mkdir()
+    (staged / "nested").mkdir()
+    (staged / "nested" / "file.txt").write_bytes(b"changed\n")
+    try:
+        (target / "nested").symlink_to(target / "real", target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable on this platform")
+
+    with pytest.raises(HealingConflictError):
+        scanner_module._safe_target_path(target, "nested/file.txt")
+    expected = scanner_module._snapshot_tree(target)
+    result = scanner_module.HealResult(
+        output_path=str(staged),
+        readiness_score_before=100.0,
+        readiness_score_after=100.0,
+    )
+    with pytest.raises(HealingConflictError):
+        scanner_module._apply_staged_output(target, staged, result, expected)
+    assert not (target / "real" / "file.txt").exists()
+
+
+def test_apply_rejects_symlink_leaf_without_following_it(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    outside = tmp_path / "outside.txt"
+    target.mkdir()
+    outside.write_bytes(b"outside\n")
+    try:
+        (target / "file.txt").symlink_to(outside)
+    except OSError:
+        pytest.skip("file symlinks are unavailable on this platform")
+
+    with pytest.raises(HealingConflictError):
+        scanner_module._safe_target_path(target, "file.txt")
+    assert outside.read_bytes() == b"outside\n"
+
+
+def test_apply_heal_result_uses_staging_baseline_to_detect_late_source_change(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    source = target / "requirements.txt"
+    source.write_text("requests\n", encoding="utf-8")
+    result = heal_repository(target, tmp_path / "staged")
+
+    source.write_text("requests\n# local change\n", encoding="utf-8")
+    with pytest.raises(HealingConflictError):
+        apply_heal_result(target, result)
+    assert source.read_text(encoding="utf-8") == "requests\n# local change\n"
+
+
+def test_healer_refuses_source_change_during_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    source = target / "app.py"
+    source.write_text("value = r'C:\\Users\\dev\\data'\n", encoding="utf-8")
+    original = scanner_module._scan_python
+    changed = False
+
+    def scan_and_race(target_path: Path, path: Path, issues: list[object]) -> None:
+        nonlocal changed
+        original(target_path, path, issues)
+        if not changed:
+            changed = True
+            source.write_text("value = 'user edit'\n", encoding="utf-8")
+
+    monkeypatch.setattr(scanner_module, "_scan_python", scan_and_race)
+    with pytest.raises(HealingConflictError, match="while it was being scanned"):
+        heal_repository(target, tmp_path / "staged")
+    assert not (tmp_path / "staged").exists()
+
+
+def test_healer_refuses_source_change_during_staging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    source = target / "app.py"
+    source.write_text("value = r'C:\\Users\\dev\\data'\n", encoding="utf-8")
+    original = scanner_module._repair_source_file
+    changed = False
+
+    def repair_and_race(target_path: Path, path: Path) -> tuple[str, str]:
+        nonlocal changed
+        result = original(target_path, path)
+        if not changed:
+            changed = True
+            source.write_text("value = 'user edit during stage'\n", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(scanner_module, "_repair_source_file", repair_and_race)
+    with pytest.raises(HealingConflictError, match="while healing was being staged"):
+        heal_repository(target, tmp_path / "staged")
+    assert source.read_text(encoding="utf-8") == "value = 'user edit during stage'\n"
+
+
+def test_healer_does_not_follow_windows_junction_or_reparse_point(
+    tmp_path: Path,
+) -> None:
+    if os.name != "nt":
+        pytest.skip("Windows junction primitives are unavailable on this platform")
+    target = tmp_path / "target"
+    outside = tmp_path / "outside"
+    target.mkdir()
+    outside.mkdir()
+    (outside / "outside.py").write_text(
+        "value = r'C:\\Users\\outside\\data'\n", encoding="utf-8"
+    )
+    junction = target / "linked"
+    created = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(junction), str(outside)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if created.returncode != 0 or not scanner_module._is_reparse_point(junction):
+        pytest.skip("Windows junction creation is unavailable on this host")
+    before = (outside / "outside.py").read_bytes()
+    try:
+        output = tmp_path / "output"
+        try:
+            result = heal_repository(target, output)
+        except HealingConflictError:
+            # A host without permission to recreate a junction as a symlink
+            # must refuse the stage rather than dereference it.
+            assert not (output / "linked").exists() or scanner_module._is_link_like(
+                output / "linked"
+            )
+        else:
+            assert result.remaining_issues == []
+            assert scanner_module._is_link_like(output / "linked")
+            assert "PATH-WINDOWS-DRIVE" not in {
+                issue.issue_id for issue in scan_repository(target)
+            }
+        assert (outside / "outside.py").read_bytes() == before
+    finally:
+        subprocess.run(
+            ["cmd", "/c", "rmdir", str(junction)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )

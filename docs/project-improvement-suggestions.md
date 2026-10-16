@@ -36,7 +36,7 @@ digest references, runtime variants, and package-manager selection are preserved
 See `docs/native-package-managers.md` and the regression coverage in
 `tests/test_apt_healer.py`.
 
-### 2. Add explicit post-heal verification
+### 2. [DONE] Add explicit post-heal verification
 
 Expose a clear before/after healing summary in the API and dashboard:
 
@@ -69,7 +69,12 @@ Example:
 The product should show why a target was not certified rather than only  
 displaying a generic failure state.
 
-### 3. Add incremental scanning and caching
+**Completed 2026-10-16:** Auto-healed audits now expose a typed
+`post_heal_summary` with before/fixed/remaining findings, changed files,
+readiness and dependency deltas, certificate status, and evidence-derived
+blocking reasons. JSON and Markdown exports include the summary.
+
+### 3. [DONE] Add incremental scanning and caching
 
 Use the existing Merkle hashing as the basis for a cache keyed by:
 
@@ -80,6 +85,12 @@ Use the existing Merkle hashing as the basis for a cache keyed by:
 
 Only changed files would need rescanning. This would improve responsiveness on  
 large repositories while preserving deterministic results.
+
+**Completed 2026-10-16:** `worksonmymachine.incremental` provides a portable
+cache keyed by file content, metadata, scanner version, and rule-set version.
+Unchanged files reuse validated findings; changed, removed, or invalidated
+entries are rescanned safely. The cache is available to callers without
+changing the default full-scan behavior.
 
 ## Product and Architecture
 
@@ -189,11 +200,16 @@ Build on the Merkle certificate with optional Ed25519, Sigstore, or Cosign
 signatures so certificates can be independently verified in CI or on another  
 machine.
 
-### 13. Harden the staged-copy boundary
+### 13. [DONE] Harden the staged-copy boundary
 
 Add explicit protections and tests for symlink escapes, Windows junctions and  
 reparse points, TOCTOU changes during staging, nested output directories,  
 files changing during a scan, and malicious path names.
+
+**Completed 2026-10-16:** Staging and apply paths now detect and reject
+symlink/junction/reparse escapes, unsafe relative names, nested output escapes,
+source changes during staging, and stale staged results before writes. Atomic
+apply rollback protections remain in place.
 
 ## CI and Integrations
 
@@ -208,7 +224,7 @@ checks, and a default “new findings only” mode.
 Provide ready-to-copy examples for GitLab CI, Azure Pipelines, Jenkins,  
 Buildkite, and generic shell-based CI.
 
-### 16. Add a shared machine-readable policy file
+### 16. [DONE] Add a shared machine-readable policy file
 
 Use one policy engine across the CLI, API, dashboard, GitHub Action, and  
 pre-commit hook:
@@ -222,14 +238,25 @@ allow_floating_docker_tags = false
 require_lockfiles = true
 ```
 
+**Completed 2026-10-16:** `.worksonmymachine.toml` now accepts a validated
+`[policy]` table with shared defaults for severity gates, readiness,
+reproducibility, floating Docker tags, and lockfile requirements. The immutable
+policy object and loader helpers are available to CLI, API, and integration
+consumers.
+
 ## Testing and Reliability
 
-### 17. Add Linux and macOS CI
+### 17. [DONE] Add Linux and macOS CI
 
 The project promises cross-platform behavior, so CI should cover Windows,  
 Ubuntu, and macOS for path normalization, CRLF handling, shell executable-bit  
 behavior, symlinks, Dockerfile parsing, Merkle-root stability, and static asset  
 delivery.
+
+**Completed 2026-10-16:** `.github/workflows/cross-platform.yml` tests the
+pinned Python project on Windows, Ubuntu, and macOS, installs locked
+dependencies, runs the offline test command, and conditionally checks tracked
+JavaScript syntax without requiring Docker.
 
 ### 18. Add property-based tests
 

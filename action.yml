@@ -1,0 +1,111 @@
+name: WorksOnMyMachine
+description: Audit a caller repository for cross-OS reproducibility issues and emit a SARIF report.
+author: WorksOnMyMachine contributors
+
+branding:
+  icon: shield
+  color: blue
+
+inputs:
+  target:
+    description: Workspace-relative target to audit.
+    required: false
+    default: workspace
+  fail-on:
+    description: Minimum finding severity that fails the check (critical, high, medium, or low).
+    required: false
+    default: ''
+  min-readiness:
+    description: Minimum Linux readiness score from 0 through 100.
+    required: false
+    default: ''
+  new-only:
+    description: Report only findings that are not present in the baseline.
+    required: false
+    default: 'false'
+  baseline:
+    description: Baseline JSON path, relative to the caller repository unless absolute.
+    required: false
+    default: .worksonmymachine-baseline.json
+  output:
+    description: SARIF report path, relative to the caller repository unless absolute.
+    required: false
+    default: worksonmymachine.sarif
+  sarif-path:
+    description: Optional alias for output; when set, it takes precedence.
+    required: false
+    default: ''
+
+outputs:
+  report-path:
+    description: Path of the SARIF report written by the action.
+    value: ${{ steps.check.outputs.report-path }}
+  report:
+    description: Alias for report-path.
+    value: ${{ steps.check.outputs.report-path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Install WorksOnMyMachine
+      shell: bash
+      run: python -m pip install --disable-pip-version-check "${{ github.action_path }}"
+
+    - name: Run WorksOnMyMachine check
+      id: check
+      shell: bash
+      env:
+        WORKSPACE_ROOT: ${{ github.workspace }}
+        TARGET: ${{ inputs.target }}
+        FAIL_ON: ${{ inputs.fail-on }}
+        MIN_READINESS: ${{ inputs.min-readiness }}
+        NEW_ONLY: ${{ inputs.new-only }}
+        BASELINE: ${{ inputs.baseline }}
+        OUTPUT_PATH: ${{ inputs.output }}
+        SARIF_PATH: ${{ inputs.sarif-path }}
+      working-directory: ${{ github.workspace }}
+      run: |
+        set -euo pipefail
+
+        report_path="${OUTPUT_PATH}"
+        if [[ -n "${SARIF_PATH}" ]]; then
+          report_path="${SARIF_PATH}"
+        fi
+        if [[ -z "${report_path}" ]]; then
+          echo 'The SARIF report path must not be empty.' >&2
+          exit 2
+        fi
+
+        args=(check "${TARGET}" --root "${WORKSPACE_ROOT}" --format sarif --output "${report_path}")
+        if [[ -n "${FAIL_ON}" ]]; then
+          args+=(--fail-on "${FAIL_ON}")
+        fi
+        if [[ -n "${MIN_READINESS}" ]]; then
+          args+=(--min-readiness "${MIN_READINESS}")
+        fi
+        if [[ -n "${BASELINE}" ]]; then
+          args+=(--baseline "${BASELINE}")
+        fi
+        case "${NEW_ONLY,,}" in
+          true|1|yes)
+            args+=(--new-only)
+            ;;
+          false|0|no|'')
+            ;;
+          *)
+            echo 'new-only must be true or false.' >&2
+            exit 2
+            ;;
+        esac
+
+        set +e
+        python -m worksonmymachine "${args[@]}"
+        status=$?
+        set -e
+        printf 'report-path=%s\n' "${report_path}" >> "${GITHUB_OUTPUT}"
+        exit "${status}"

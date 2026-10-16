@@ -30,6 +30,11 @@ from .scanner import (
     readiness_score,
     scan_repository,
 )
+from .watch import (
+    DEFAULT_DEBOUNCE_SECONDS,
+    DEFAULT_POLL_INTERVAL,
+    watch_directory,
+)
 
 
 _DRIVE_PATH = re.compile(r"^[A-Za-z]:[\\/]")
@@ -469,6 +474,86 @@ def scan(target: str | None, workspace_root: Path | None) -> None:
     console = _console()
     _print_issue_table(console, issues)
     console.print(f"Readiness score: {readiness_score(issues):.2f}/100")
+
+
+def _resolve_watch_target(
+    value: str | Path | None, workspace_root: str | Path | None = None
+) -> Path:
+    """Resolve a watch path from the caller's current directory or workspace."""
+
+    if value is None or str(value).strip() in {"", "workspace"}:
+        candidate = _resolve_workspace_root(workspace_root)
+    else:
+        raw = Path(value).expanduser()
+        if raw.is_absolute():
+            candidate = raw
+        elif str(value).replace("\\", "/") in {".", "./"}:
+            candidate = (
+                _resolve_workspace_root(workspace_root)
+                if workspace_root
+                else Path.cwd()
+            )
+        else:
+            base = _resolve_workspace_root(workspace_root) if workspace_root else Path.cwd()
+            candidate = base / raw
+            if not candidate.is_dir() and workspace_root is None:
+                try:
+                    return _resolve_target(str(value), workspace_root)
+                except click.BadParameter:
+                    pass
+    try:
+        resolved = candidate.resolve()
+    except OSError as exc:
+        raise click.BadParameter(
+            f"watch target is not accessible: {value or 'workspace'}"
+        ) from exc
+    if not resolved.is_dir():
+        raise click.BadParameter(f"watch target is not a directory: {value or 'workspace'}")
+    return resolved
+
+
+@main.command("watch")
+@click.argument("target", required=False, default=None)
+@click.option(
+    "--workspace-root",
+    "--root",
+    "workspace_root",
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Watch this caller repository instead of the installed package workspace.",
+)
+@click.option(
+    "--interval",
+    "poll_interval",
+    type=click.FloatRange(min=0.05),
+    default=DEFAULT_POLL_INTERVAL,
+    show_default=True,
+    help="Seconds between metadata polls.",
+)
+@click.option(
+    "--debounce",
+    "debounce_seconds",
+    type=click.FloatRange(min=0.0),
+    default=DEFAULT_DEBOUNCE_SECONDS,
+    show_default=True,
+    help="Seconds a changed snapshot must remain stable before rescanning.",
+)
+def watch(
+    target: str | None,
+    workspace_root: Path | None,
+    poll_interval: float,
+    debounce_seconds: float,
+) -> None:
+    """Watch TARGET for changes and print new scan findings (scan-only)."""
+
+    target_path = _resolve_watch_target(target, workspace_root)
+    click.echo(f"Watching {target_path} (Ctrl+C to stop)")
+    result = watch_directory(
+        target_path,
+        poll_interval=poll_interval,
+        debounce_seconds=debounce_seconds,
+    )
+    if result.stopped:
+        click.echo("Stopped watching.")
 
 
 @main.command("parse-log")

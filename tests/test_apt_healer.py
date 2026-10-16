@@ -73,6 +73,49 @@ def test_parser_knowledge_base_covers_additional_native_failures(
     assert packages <= set(diagnostic.recommended_apt_packages)
 
 
+@pytest.mark.parametrize(
+    ("log_text", "code", "packages"),
+    [
+        (
+            "npm ERR! sharp: failed to build from source because libvips was not found",
+            "missing-sharp-libvips-development-files",
+            {"libvips-dev"},
+        ),
+        (
+            "npm ERR! canvas native build failed: cairo headers are missing",
+            "missing-canvas-development-files",
+            {"libcairo2-dev", "libpango1.0-dev", "libgif-dev"},
+        ),
+        (
+            "gyp ERR! find Python: could not find any Python installation; make and g++ "
+            "are not found",
+            "missing-node-gyp-build-tools",
+            {"python3", "make", "g++"},
+        ),
+    ],
+)
+def test_node_native_addon_rules_require_build_failure_evidence(
+    log_text: str, code: str, packages: set[str]
+) -> None:
+    diagnostic = next(
+        item for item in parse_compiler_log(log_text) if item.code == code
+    )
+
+    assert packages <= set(diagnostic.recommended_apt_packages)
+
+
+@pytest.mark.parametrize(
+    "log_text",
+    [
+        "The sharp package uses libvips-dev for image processing.",
+        "canvas depends on libcairo2-dev, libpango1.0-dev, and libgif-dev.",
+        "node-gyp uses python3, make, and g++ for native addons.",
+    ],
+)
+def test_node_native_addon_rules_ignore_ordinary_package_mentions(log_text: str) -> None:
+    assert parse_compiler_log(log_text) == []
+
+
 def test_hybrid_analysis_is_offline_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("LLM_API_KEY", raising=False)
 
@@ -146,6 +189,30 @@ def test_fedora_healing_uses_dnf_and_rhel_package_names(tmp_path: Path) -> None:
     assert "python3-devel" in result.after_content
     assert "apt-get" not in result.after_content
     assert "apk add" not in result.after_content
+
+
+def test_alpine_canvas_healing_translates_all_native_addon_packages(tmp_path: Path) -> None:
+    target = tmp_path / "canvas-alpine-target"
+    target.mkdir()
+    (target / "Dockerfile.broken").write_text(
+        "FROM node:22-alpine3.20\nWORKDIR /app\nRUN npm install\n",
+        encoding="utf-8",
+    )
+    (target / "build_error.log").write_text(
+        "npm ERR! canvas native build failed: cairo headers are missing\n",
+        encoding="utf-8",
+    )
+
+    result = heal_dockerfile(target, tmp_path / "canvas-alpine-output")
+
+    assert result.package_manager == "apk"
+    assert {"cairo-dev", "pango-dev", "giflib-dev"} <= set(result.packages)
+    assert "RUN apk add --no-cache" in result.after_content
+    assert "cairo-dev" in result.after_content
+    assert "pango-dev" in result.after_content
+    assert "giflib-dev" in result.after_content
+    assert "apt-get" not in result.after_content
+    assert "dnf install" not in result.after_content
 
 
 def test_unknown_base_does_not_guess_a_package_manager(tmp_path: Path) -> None:

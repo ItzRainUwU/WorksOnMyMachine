@@ -117,6 +117,36 @@ _PACKAGE_MAP: dict[str, dict[str, tuple[str, ...]]] = {
         "apk": ("libsndfile-dev",),
         "dnf": ("libsndfile-devel",),
     },
+    "libvips-dev": {
+        "apt": ("libvips-dev",),
+        "apk": ("vips-dev",),
+        "dnf": ("vips-devel",),
+    },
+    "libcairo2-dev": {
+        "apt": ("libcairo2-dev",),
+        "apk": ("cairo-dev",),
+        "dnf": ("cairo-devel",),
+    },
+    "libpango1.0-dev": {
+        "apt": ("libpango1.0-dev",),
+        "apk": ("pango-dev",),
+        "dnf": ("pango-devel",),
+    },
+    "libgif-dev": {
+        "apt": ("libgif-dev",),
+        "apk": ("giflib-dev",),
+        "dnf": ("giflib-devel",),
+    },
+    "python3": {
+        "apt": ("python3",),
+        "apk": ("python3",),
+        "dnf": ("python3",),
+    },
+    "make": {
+        "apt": ("make",),
+        "apk": ("make",),
+        "dnf": ("make",),
+    },
 }
 
 _DISTRO_TO_MANAGER = {"debian": "apt", "alpine": "apk", "fedora": "dnf"}
@@ -275,6 +305,44 @@ _RULES: tuple[_DiagnosticRule, ...] = (
         r"(?:\bsndfile\.h\b|\blibsndfile\b.*(?:not found|missing))",
         "An audio extension needs libsndfile headers, which are missing from the image.",
         "gcc",
+    ),
+    _rule(
+        "missing-sharp-libvips-development-files",
+        "sharp/libvips",
+        ("libvips-dev",),
+        r"(?is)(?=.*\bsharp\b)(?=.*\b(?:native|source|libvips|prebuilt|node-gyp|"
+        r"build(?:ing)?|built|compil(?:e|ed|ing|ation)?)\b)(?=.*(?:\berror\b|"
+        r"\bfail(?:ed|ure|ures)?\b|"
+        r"\bfailure\b|\bnot found\b|\bmissing\b|\bunable\b|\bcannot\b|"
+        r"\bcould not\b|\bno such file\b|\bfatal\b))",
+        "The sharp native/source build cannot use its libvips development files.",
+        "npm",
+    ),
+    _rule(
+        "missing-canvas-development-files",
+        "canvas/cairo/pango/giflib",
+        ("libcairo2-dev", "libpango1.0-dev", "libgif-dev"),
+        r"(?is)(?=.*\bcanvas\b)(?=.*\b(?:native|source|node-gyp|node-pre-gyp|gyp|"
+        r"build(?:ing)?|built|compil(?:e|ed|ing|ation)?)\b)(?=.*(?:\berror\b|"
+        r"\bfail(?:ed|ure|ures)?\b|"
+        r"\bfailure\b|\bnot found\b|\bmissing\b|\bunable\b|\bcannot\b|"
+        r"\bcould not\b|\bno such file\b|\bfatal\b))",
+        "The canvas native build is missing Cairo, Pango, and GIF development files.",
+        "npm",
+    ),
+    _rule(
+        "missing-node-gyp-build-tools",
+        "node-gyp/Python/make/g++",
+        ("python3", "make", "g++"),
+        r"(?is)(?=.*\b(?:node-gyp|gyp)\b)(?=.*(?:(?:\bpython3?\b|\bmake\b|"
+        r"\bg\+\+(?!\w)|\bgcc\b).{0,180}(?:not found|missing|not installed|"
+        r"unable|cannot|can't find|couldn't find|could not|no such file|not in path|"
+        r"not set|produced an error)|(?:not found|missing|not installed|unable|"
+        r"cannot|can't find|couldn't find|could not|no such file|not in path|not set|"
+        r"produced an error).{0,180}(?:\bpython3?\b|\bmake\b|\bg\+\+(?!\w)|"
+        r"\bgcc\b)))",
+        "The node-gyp native build is missing Python or its make/C++ toolchain.",
+        "node-gyp",
     ),
 )
 

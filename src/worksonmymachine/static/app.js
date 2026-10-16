@@ -465,6 +465,117 @@
     output.textContent = (result.detail || "") + (result.output ? "\n\n" + result.output : "");
   }
 
+  function dependencyPackages(report) {
+    var packages = [];
+    var analysis = state.analysis || {};
+    packages = packages.concat(safeArray(analysis.apt_packages || analysis.recommended_apt_packages));
+    safeArray(report && (report.diagnostics || report.compiler_diagnostics)).forEach(function (diagnostic) {
+      packages = packages.concat(safeArray(diagnostic.recommended_apt_packages));
+    });
+    return packages.map(function (item) { return String(item || "").trim(); }).filter(Boolean).filter(function (item, index, values) { return values.indexOf(item) === index; }).slice(0, 12);
+  }
+
+  function dockerBaseEvidence(report, fileNodes) {
+    var sources = [];
+    var patch = report && (report.dockerfile_patch || safeArray(report.dockerfile_patches)[0]);
+    if (patch) sources.push(patch.before_content || "", patch.after_content || "", patch.patched_content || "", patch.unified_diff || patch.diff || "");
+    safeArray(report && report.unified_diffs).filter(function (diff) { return /dockerfile/i.test(diff); }).forEach(function (diff) { sources.push(diff); });
+    var bases = [];
+    sources.join("\n").split("\n").forEach(function (line) {
+      var match = line.match(/^\+?\s*FROM\s+(?:--platform=\S+\s+)?(\S+)/i);
+      if (match && bases.indexOf(match[1]) < 0) bases.push(match[1]);
+    });
+    if (!bases.length && fileNodes.some(function (node) { return /^dockerfile(?:\.|$)/i.test(String(node.path || "").split("/").pop()); })) bases.push("Dockerfile base pending");
+    return bases.slice(0, 4);
+  }
+
+  function graphNodeMarkup(node) {
+    var width = 190;
+    var label = truncate(node.label, 26, 0);
+    var meta = truncate(node.meta || node.kind, 30, 0);
+    return '<g class="graph-node graph-node-' + escapeHtml(node.kind) + '" transform="translate(' + node.x + ' ' + node.y + ')"><rect width="' + width + '" height="52" rx="5"></rect><text x="12" y="22">' + escapeHtml(label) + '</text><text class="graph-node-meta" x="12" y="39">' + escapeHtml(meta) + '</text></g>';
+  }
+
+  function graphEdgeMarkup(from, to) {
+    var startX = from.x + 190;
+    var startY = from.y + 26;
+    var endX = to.x;
+    var endY = to.y + 26;
+    var control = Math.max(30, (endX - startX) * 0.42);
+    return '<path class="graph-edge" d="M ' + startX + ' ' + startY + ' C ' + (startX + control) + ' ' + startY + ', ' + (endX - control) + ' ' + endY + ', ' + endX + ' ' + endY + '"></path>';
+  }
+
+  function renderDependencyGraph() {
+    var panel = byId("dependency-graph");
+    var status = byId("dependency-graph-status");
+    if (!panel) return;
+    var report = state.report;
+    var certificate = selectedCertificate(report);
+    var fileNodes = safeArray(certificate.file_nodes);
+    var manifests = safeArray(report && report.dependency_telemetry && report.dependency_telemetry.manifests);
+    var packageNames = dependencyPackages(report);
+    var dockerBases = dockerBaseEvidence(report, fileNodes);
+    var evidenceCount = fileNodes.length + manifests.length + packageNames.length + dockerBases.length;
+    if (!report && !state.analysis) {
+      if (status) status.textContent = "Awaiting audit evidence";
+      panel.innerHTML = '<div class="empty-state compact-empty">' + icon("dependencyGraph", 25) + '<strong>No dependency evidence yet</strong><span>Run an audit to map certificate files, manifests, parsed packages, and Docker base evidence.</span></div>';
+      hydrateIcons();
+      return;
+    }
+    if (!evidenceCount) {
+      if (status) status.textContent = "No graphable evidence returned";
+      panel.innerHTML = '<div class="empty-state compact-empty">' + icon("dependencyGraph", 25) + '<strong>Nothing to graph yet</strong><span>The current report has no file, manifest, package, or Docker evidence. Run a scan or parse a compiler trace to add evidence.</span></div>';
+      return;
+    }
+
+    var target = { kind: "target", label: state.target, meta: "active workspace target", x: 24, y: 24 };
+    var certificateNode = { kind: "certificate", label: certificate.root_hash ? "CleanRoom certificate" : "Certificate pending", meta: certificate.root_hash ? truncate(certificate.root_hash, 16, 0) : "audit proof", x: 248, y: 24 };
+    var graphFiles = fileNodes.slice(0, 14).map(function (node, index) {
+      return { kind: "file", label: node.path, meta: (node.has_crlf ? "file / CRLF / " : "file / ") + truncate(node.digest, 12, 0), x: 472, y: 24 + index * 64 };
+    });
+    manifests.filter(function (manifest) { return !graphFiles.some(function (node) { return node.label === manifest; }); }).slice(0, 8).forEach(function (manifest, index) {
+      graphFiles.push({ kind: "file", label: manifest, meta: "manifest / lock evidence", x: 472, y: 24 + (fileNodes.length + index) * 64 });
+    });
+    var packages = packageNames.map(function (name, index) {
+      return { kind: "package", label: name, meta: "apt package / parsed build evidence", x: 716, y: 24 + index * 64 };
+    });
+    var dockerNodes = dockerBases.map(function (base, index) {
+      return { kind: "docker", label: base, meta: "Docker base evidence", x: 716, y: 24 + (packageNames.length + index) * 64 };
+    });
+    var nodes = [target, certificateNode].concat(graphFiles, packages, dockerNodes);
+    var edges = [graphEdgeMarkup(target, certificateNode)];
+    graphFiles.forEach(function (node) { edges.push(graphEdgeMarkup(certificateNode, node)); });
+    packages.forEach(function (node) { edges.push(graphEdgeMarkup(certificateNode, node)); });
+    dockerNodes.forEach(function (node) { edges.push(graphEdgeMarkup(certificateNode, node)); });
+    if (graphFiles.length && packages.length) {
+      packages.forEach(function (node, index) { edges.push(graphEdgeMarkup(graphFiles[index % graphFiles.length], node)); });
+    }
+    if (dockerNodes.length) {
+      var dockerFile = graphFiles.find(function (node) { return /^dockerfile(?:\.|$)/i.test(node.label.split("/").pop()); });
+      if (dockerFile) dockerNodes.forEach(function (node) { edges.push(graphEdgeMarkup(dockerFile, node)); });
+    }
+    var maxY = Math.max.apply(null, nodes.map(function (node) { return node.y + 52; }));
+    var width = 930;
+    panel.innerHTML = '<svg viewBox="0 0 ' + width + ' ' + Math.max(320, maxY + 24) + '" role="img" aria-label="Dependency evidence graph for ' + escapeHtml(state.target) + '"><g aria-hidden="true">' + edges.join("") + nodes.map(graphNodeMarkup).join("") + '</g></svg>';
+    if (status) status.textContent = nodes.length + " evidence nodes / " + (nodes.length - 1) + " relationships";
+  }
+
+  function renderOverview() {
+    var report = state.report;
+    var certificate = selectedCertificate(report);
+    var issues = displayIssues();
+    var telemetry = report && report.dependency_telemetry ? report.dependency_telemetry : {};
+    setText("overview-target", state.target);
+    setText("overview-issue-count", issues.length);
+    setText("overview-issue-meta", report ? (issues.length ? "Review required" : "No findings returned") : "Awaiting scan");
+    setText("overview-manifest-count", safeArray(telemetry.manifests).length);
+    setText("overview-docker-status", report ? (certificate.dockerfile_hardened ? "Hardened" : "Review") : "--");
+    setText("overview-docker-meta", report ? "Docker base posture" : "Evidence pending");
+    setText("overview-run-time", report ? new Date(report.scanned_at || Date.now()).toLocaleTimeString() : "--");
+    setText("overview-run-meta", report ? "Last audit completed" : "No audit recorded");
+    setText("overview-callout", report ? (issues.length ? "Open the Cross-OS Bugs register to inspect findings and source evidence." : "No cross-platform findings returned. Dependency and certificate evidence are ready to inspect.") : "Run an audit to populate deterministic file, dependency, and Docker evidence.");
+  }
+
   function issueDiff(issue) {
     var report = state.report;
     if (!report || !issue || !issue.file_path) return "";
@@ -620,9 +731,11 @@
 
   function renderAll() {
     renderKpis();
+    renderOverview();
     renderIssueList();
     renderDockerfile();
     renderCertificate();
+    renderDependencyGraph();
     renderReportJson();
     renderHistory();
     renderBuildVerification();
@@ -633,16 +746,16 @@
   function setDrawerView(view) {
     var drawer = byId("detail-drawer");
     if (!drawer) return;
+    if (view !== "issue") {
+      selectView(view);
+      return;
+    }
     drawer.classList.add("is-open");
     drawer.setAttribute("aria-hidden", "false");
     document.querySelectorAll("[data-drawer-view]").forEach(function (panel) {
       panel.classList.toggle("is-active", panel.getAttribute("data-drawer-view") === view);
     });
-    var titles = { dependency: ["DEPENDENCY GRAPH / BUILD TELEMETRY", "Compiler Sandbox"], build: ["BUILD & DEPLOY / STAGING", "Isolated Healing Operations"], security: ["SECURITY / PROOF ARTIFACT", "CleanRoom Certificate"], reports: ["REPORTS / AUDIT RECEIPT", "Run Evidence"], issue: ["FINDING / SOURCE EVIDENCE", "Issue detail"], settings: ["SETTINGS / LOCAL ENGINE", "Runtime Posture"] };
-    var title = titles[view] || titles.reports;
-    setText("drawer-kicker", title[0]);
-    setText("drawer-title", title[1]);
-    state.activeView = view;
+    setText("drawer-title", "Issue detail");
   }
 
   function closeDrawer() {
@@ -650,8 +763,6 @@
     if (!drawer) return;
     drawer.classList.remove("is-open");
     drawer.setAttribute("aria-hidden", "true");
-    state.activeView = "dashboard";
-    document.querySelectorAll("[data-view]").forEach(function (button) { button.classList.toggle("is-active", button.getAttribute("data-view") === "dashboard"); });
   }
 
   function setTargetPopover(open) {
@@ -718,18 +829,19 @@
   }
 
   function selectView(view) {
-    document.querySelectorAll("[data-view]").forEach(function (button) { button.classList.toggle("is-active", button.getAttribute("data-view") === view); });
-    if (view === "dashboard" || view === "bugs") {
-      closeDrawer();
-      document.querySelectorAll("[data-view]").forEach(function (button) { button.classList.toggle("is-active", button.getAttribute("data-view") === view); });
-      if (view === "bugs") {
-        var panel = byId("bugs-panel");
-        if (panel) panel.classList.add("is-focus");
-        window.setTimeout(function () { if (panel) panel.classList.remove("is-focus"); }, 700);
-      }
-      return;
-    }
-    setDrawerView(view);
+    var requested = view || "dashboard";
+    var knownViews = ["dashboard", "bugs", "dependency", "sandbox", "build", "security", "reports", "settings"];
+    if (knownViews.indexOf(requested) < 0) requested = "dashboard";
+    closeDrawer();
+    document.querySelectorAll("[data-page-view]").forEach(function (page) {
+      var active = page.getAttribute("data-page-view") === requested;
+      page.classList.toggle("is-active", active);
+      page.hidden = !active;
+    });
+    var navView = requested === "sandbox" ? "dependency" : requested;
+    document.querySelectorAll(".nav-item[data-view]").forEach(function (button) { button.classList.toggle("is-active", button.getAttribute("data-view") === navView); });
+    state.activeView = requested;
+    if (requested === "dependency") renderDependencyGraph();
   }
 
   async function loadTargets() {
@@ -798,7 +910,8 @@
       state.analysis = await request("/api/v1/parse-log", { method: "POST", body: { target: state.target } });
       logEvent("compiler telemetry received", "success");
       renderAnalysis();
-      setDrawerView("dependency");
+      renderDependencyGraph();
+      selectView("sandbox");
       showToast("Compiler telemetry parsed.", false);
     } catch (error) {
       logEvent("parse failed: " + error.message, "error");
@@ -820,6 +933,7 @@
     try {
       state.analysis = await request("/api/v1/parse-log", { method: "POST", body: { log_text: text } });
       renderAnalysis();
+      renderDependencyGraph();
       logEvent("custom compiler trace normalized", "success");
       showToast("Custom compiler trace parsed.", false);
     } catch (error) {
@@ -1009,9 +1123,10 @@
       state.newOnly = Boolean(event.target.checked);
       if (state.report) runAudit(state.auditWasAutoHealed, false);
     });
-    on("view-file-button", "click", function () { setDrawerView("build"); });
+    on("view-file-button", "click", function () { selectView("build"); });
     on("drawer-close", "click", closeDrawer);
-    on("terminal-toggle", "click", function () { setDrawerView("reports"); });
+    on("terminal-toggle", "click", function () { selectView("reports"); });
+    on("open-sandbox-button", "click", function () { selectView("sandbox"); });
     on("workspace-target-toggle", "click", function () {
       var popover = byId("target-path-popover");
       setTargetPopover(!popover || !popover.classList.contains("is-open"));
@@ -1046,7 +1161,7 @@
       document.querySelectorAll("[data-issue-filter]").forEach(function (item) { item.classList.toggle("is-active", item.getAttribute("data-issue-filter") === state.issueFilter); });
       renderIssueList();
     });
-    on("verify-build-button", "click", function () { setDrawerView("build"); verifyBuild(); });
+    on("verify-build-button", "click", function () { selectView("build"); verifyBuild(); });
     document.querySelectorAll("[data-view]").forEach(function (button) { button.addEventListener("click", function () { selectView(button.getAttribute("data-view")); }); });
     document.querySelectorAll("[data-log-preset]").forEach(function (button) { button.addEventListener("click", function () { var editor = byId("compiler-log-editor"); if (editor) editor.value = logPresets[button.getAttribute("data-log-preset")] || ""; }); });
     document.addEventListener("click", function (event) {
@@ -1055,6 +1170,13 @@
       var popover = byId("target-path-popover");
       var toggle = byId("workspace-target-toggle");
       if (popover && popover.classList.contains("is-open") && !popover.contains(event.target) && event.target !== toggle && (!toggle || !toggle.contains(event.target))) setTargetPopover(false);
+    });
+    document.addEventListener("keydown", function (event) {
+      var drawer = byId("detail-drawer");
+      if (event.key === "Escape" && drawer && drawer.classList.contains("is-open")) {
+        event.preventDefault();
+        closeDrawer();
+      }
     });
   }
 

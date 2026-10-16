@@ -53,6 +53,113 @@ def test_nightmare_scanner_detects_paths_environment_and_shell_landmines() -> No
     assert "EXEC_PERMISSIONS" in _issue_categories(target)
 
 
+def test_secret_scanner_detects_high_confidence_values_without_raw_evidence(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    api_key = "sk-" + "a" * 32
+    password = "correct-horse-" + "battery"
+    access_key = "AKIA" + "B" * 16
+    github_token = "ghp_" + "c" * 36
+    private_material = "-----BEGIN PRIVATE KEY-----\\n" + "d" * 48
+    (target / "app.py").write_text(
+        "OPENAI_API_KEY = " + repr(api_key) + "\n"
+        "DATABASE_PASSWORD = " + repr(password) + "\n"
+        "AWS_ACCESS_KEY_ID = " + repr(access_key) + "\n"
+        "GITHUB_TOKEN = " + repr(github_token) + "\n"
+        "SIGNING_PRIVATE_KEY = " + repr(private_material) + "\n",
+        encoding="utf-8",
+    )
+
+    issues = [
+        issue for issue in scan_repository(target) if issue.category == "SECRET_EXPOSURE"
+    ]
+
+    assert {issue.issue_id for issue in issues} == {
+        "SECRET-API-KEY",
+        "SECRET-CLOUD-CREDENTIAL",
+        "SECRET-PRIVATE-KEY",
+        "SECRET-PASSWORD",
+        "SECRET-TOKEN",
+    }
+    rendered = repr(issues)
+    for raw_value in (api_key, password, access_key, github_token, private_material):
+        assert raw_value not in rendered
+    assert all(issue.severity.value == "critical" for issue in issues)
+    assert any("••" in evidence for issue in issues for evidence in issue.evidence)
+
+
+def test_secret_scanner_reports_dotenv_files_but_skips_safe_templates(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / ".env").write_text("API_KEY=runtime-value-123\n", encoding="utf-8")
+    (target / ".env.local").write_text("PASSWORD=runtime-value-456\n", encoding="utf-8")
+    (target / "settings.env").write_text("TOKEN=runtime-value-789\n", encoding="utf-8")
+    for name in (
+        ".env.example",
+        ".env.sample",
+        ".env.template",
+        ".env.dist",
+        ".env.local.example",
+    ):
+        (target / name).write_text(
+            "API_KEY=your-api-key\nTOKEN=replace-me\n", encoding="utf-8"
+        )
+
+    issues = scan_repository(target)
+    dotenv_issues = [
+        issue for issue in issues if issue.issue_id == "SECRET-ENV-FILE"
+    ]
+
+    assert {issue.file_path for issue in dotenv_issues} == {
+        ".env",
+        ".env.local",
+        "settings.env",
+    }
+    assert all(issue.line_number is None for issue in dotenv_issues)
+    assert not any(issue.file_path in {".env.example", ".env.sample"} for issue in issues)
+    rendered = repr(issues)
+    assert "runtime-value-123" not in rendered
+    assert "runtime-value-456" not in rendered
+    assert "runtime-value-789" not in rendered
+
+
+def test_secret_scanner_ignores_placeholders_and_labelled_examples(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target"
+    docs = target / "docs"
+    examples = target / "examples"
+    docs.mkdir(parents=True)
+    examples.mkdir()
+    (docs / "usage.md").write_text(
+        "Example API token: sk-" + "e" * 32 + "\n"
+        "API_KEY=your-api-key\n",
+        encoding="utf-8",
+    )
+    (examples / "config.py").write_text(
+        "API_KEY = 'replace-me-with-a-real-key'\n"
+        "PASSWORD = 'placeholder-password'\n",
+        encoding="utf-8",
+    )
+    (target / "lookup.py").write_text(
+        "API_KEY = settings.API_KEY\nPASSWORD = load_password()\n",
+        encoding="utf-8",
+    )
+    (target / "references.py").write_text(
+        "API_KEY_PATH = '/tmp/key.json'\n"
+        "GOOGLE_APPLICATION_CREDENTIALS = 'service-account.json'\n",
+        encoding="utf-8",
+    )
+
+    assert not any(
+        issue.category == "SECRET_EXPOSURE" for issue in scan_repository(target)
+    )
+
+
 def test_case_sensitive_scanner_does_not_use_host_exists_for_import_casing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

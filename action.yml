@@ -22,7 +22,7 @@ inputs:
   new-only:
     description: Report only findings that are not present in the baseline.
     required: false
-    default: 'false'
+    default: 'true'
   baseline:
     description: Baseline JSON path, relative to the caller repository unless absolute.
     required: false
@@ -35,6 +35,30 @@ inputs:
     description: Optional alias for output; when set, it takes precedence.
     required: false
     default: ''
+  annotations:
+    description: Emit GitHub workflow annotations for SARIF findings.
+    required: false
+    default: 'true'
+  summary:
+    description: Write a concise findings and report summary to the job summary.
+    required: false
+    default: 'true'
+  certificate-path:
+    description: Optional certificate JSON path to preserve in the caller workspace.
+    required: false
+    default: ''
+  patch-path:
+    description: Optional proposed patch path to preserve in the caller workspace.
+    required: false
+    default: ''
+  upload-artifacts:
+    description: Upload the certificate and patch as a workflow artifact.
+    required: false
+    default: 'false'
+  artifact-name:
+    description: Name for the optional certificate and patch workflow artifact.
+    required: false
+    default: worksonmymachine-artifacts
 
 outputs:
   report-path:
@@ -43,6 +67,12 @@ outputs:
   report:
     description: Alias for report-path.
     value: ${{ steps.check.outputs.report-path }}
+  certificate-path:
+    description: Path of the preserved certificate JSON, when requested.
+    value: ${{ steps.check.outputs.certificate-path }}
+  patch-path:
+    description: Path of the preserved proposed patch, when requested.
+    value: ${{ steps.check.outputs.patch-path }}
 
 runs:
   using: composite
@@ -68,6 +98,12 @@ runs:
         BASELINE: ${{ inputs.baseline }}
         OUTPUT_PATH: ${{ inputs.output }}
         SARIF_PATH: ${{ inputs.sarif-path }}
+        ANNOTATIONS: ${{ inputs.annotations }}
+        WRITE_SUMMARY: ${{ inputs.summary }}
+        CERTIFICATE_INPUT_PATH: ${{ inputs.certificate-path }}
+        PATCH_INPUT_PATH: ${{ inputs.patch-path }}
+        UPLOAD_ARTIFACTS: ${{ inputs.upload-artifacts }}
+        ARTIFACT_NAME: ${{ inputs.artifact-name }}
       working-directory: ${{ github.workspace }}
       run: |
         set -euo pipefail
@@ -80,6 +116,35 @@ runs:
           echo 'The SARIF report path must not be empty.' >&2
           exit 2
         fi
+        if [[ "${report_path}" == *$'\n'* || "${report_path}" == *$'\r'* ]]; then
+          echo 'The SARIF report path must not contain newlines.' >&2
+          exit 2
+        fi
+
+        emit_annotations=false
+        case "${ANNOTATIONS,,}" in
+          true|1|yes)
+            emit_annotations=true
+            ;;
+          false|0|no|'')
+            ;;
+          *)
+            echo 'annotations must be true or false.' >&2
+            exit 2
+            ;;
+        esac
+        write_summary=false
+        case "${WRITE_SUMMARY,,}" in
+          true|1|yes)
+            write_summary=true
+            ;;
+          false|0|no|'')
+            ;;
+          *)
+            echo 'summary must be true or false.' >&2
+            exit 2
+            ;;
+        esac
 
         args=(check "${TARGET}" --root "${WORKSPACE_ROOT}" --format sarif --output "${report_path}")
         if [[ -n "${FAIL_ON}" ]]; then
@@ -108,4 +173,179 @@ runs:
         status=$?
         set -e
         printf 'report-path=%s\n' "${report_path}" >> "${GITHUB_OUTPUT}"
+
+        if [[ "${emit_annotations}" == true || "${write_summary}" == true ]]; then
+          if ! REPORT_PATH="${report_path}" \
+            ANNOTATIONS_ENABLED="${emit_annotations}" \
+            SUMMARY_ENABLED="${write_summary}" \
+            python - <<'PY'
+        import json
+        import os
+        import sys
+        from collections import Counter
+
+
+        report_path = os.environ.get("REPORT_PATH", "")
+        emit_annotations = os.environ.get("ANNOTATIONS_ENABLED") == "true"
+        write_summary = os.environ.get("SUMMARY_ENABLED") == "true"
+
+
+        def command_escape(value: object, *, property_value: bool = False) -> str:
+            """Escape untrusted SARIF text for a GitHub workflow command."""
+
+            text = str(value if value is not None else "")
+            text = text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+            if property_value:
+                text = text.replace(":", "%3A").replace(",", "%2C")
+            return text
+
+
+        def markdown_code(value: object) -> str:
+            """Keep generated summary values inside one safe Markdown code span."""
+
+            text = str(value if value is not None else "")
+            return (
+                text.replace("\\", "\\\\")
+                .replace("`", "\\`")
+                .replace("\r", " ")
+                .replace("\n", " ")
+            )
+
+
+        def positive_number(value: object) -> int | None:
+            if isinstance(value, bool):
+                return None
+            if isinstance(value, int) and value > 0:
+                return value
+            return None
+
+
+        def result_level(result: dict[str, object]) -> str:
+            properties = result.get("properties")
+            if isinstance(properties, dict):
+                severity = properties.get("severity")
+                if isinstance(severity, str) and severity.lower() in {
+                    "error",
+                    "warning",
+                    "notice",
+                }:
+                    return severity.lower()
+            level = result.get("level")
+            if isinstance(level, str):
+                return {"error": "error", "warning": "warning", "note": "notice"}.get(
+                    level.lower(), "warning"
+                )
+            return "warning"
+
+
+        payload: dict[str, object] | None = None
+        try:
+            with open(report_path, encoding="utf-8") as report_file:
+                loaded = json.load(report_file)
+            if isinstance(loaded, dict):
+                payload = loaded
+        except (OSError, UnicodeError, json.JSONDecodeError, TypeError):
+            # A failed check can legitimately leave no SARIF file.  Preserve the CLI
+            # status and let the summary explain that the report was unavailable.
+            payload = None
+
+        runs = payload.get("runs", []) if payload else []
+        results: list[dict[str, object]] = []
+        if isinstance(runs, list):
+            for run in runs:
+                if not isinstance(run, dict):
+                    continue
+                run_results = run.get("results", [])
+                if isinstance(run_results, list):
+                    results.extend(
+                        result for result in run_results if isinstance(result, dict)
+                    )
+
+        if emit_annotations:
+            annotation_prefix = {
+                "error": "::error",
+                "warning": "::warning",
+                "note": "::notice",
+                "notice": "::notice",
+            }
+            for result in results:
+                level = result.get("level")
+                prefix = annotation_prefix.get(
+                    str(level).lower() if level is not None else "warning", "::warning"
+                )
+                properties: list[str] = []
+                locations = result.get("locations")
+                location = locations[0] if isinstance(locations, list) and locations else None
+                physical = location.get("physicalLocation") if isinstance(location, dict) else None
+                artifact = physical.get("artifactLocation") if isinstance(physical, dict) else None
+                if isinstance(artifact, dict) and isinstance(artifact.get("uri"), str):
+                    properties.append(
+                        f"file={command_escape(artifact['uri'], property_value=True)}"
+                    )
+                region = physical.get("region") if isinstance(physical, dict) else None
+                if isinstance(region, dict):
+                    for sarif_name, github_name in (
+                        ("startLine", "line"),
+                        ("startColumn", "col"),
+                        ("endLine", "endLine"),
+                        ("endColumn", "endColumn"),
+                    ):
+                        number = positive_number(region.get(sarif_name))
+                        if number is not None:
+                            properties.append(f"{github_name}={number}")
+                rule_id = result.get("ruleId")
+                if rule_id is not None:
+                    properties.append(f"title={command_escape(rule_id, property_value=True)}")
+                message = result.get("message")
+                message_text = message.get("text") if isinstance(message, dict) else message
+                if not isinstance(message_text, str) or not message_text:
+                    message_text = "Finding reported by SARIF."
+                suffix = f" {','.join(properties)}" if properties else ""
+                sys.stdout.write(
+                    f"{prefix}{suffix}::{command_escape(message_text)}\n"
+                )
+
+        if write_summary:
+            summary_path = os.environ.get("GITHUB_STEP_SUMMARY", "")
+            if summary_path:
+                counts = Counter(result_level(result) for result in results)
+                lines = [
+                    "## WorksOnMyMachine",
+                    "",
+                    f"- Findings: **{len(results)}**",
+                    (
+                        "- Levels: "
+                        f"**{counts.get('error', 0)} error**, "
+                        f"**{counts.get('warning', 0)} warning**, "
+                        f"**{counts.get('notice', 0)} notice**"
+                    ),
+                    f"- SARIF report: `{markdown_code(report_path)}`",
+                ]
+                if payload is None:
+                    lines.append("- Status: **SARIF report unavailable**")
+                else:
+                    metadata: dict[str, object] = {}
+                    top_properties = payload.get("properties")
+                    if isinstance(top_properties, dict):
+                        metadata.update(top_properties)
+                    if isinstance(runs, list):
+                        for run in runs:
+                            if isinstance(run, dict) and isinstance(run.get("properties"), dict):
+                                metadata.update(run["properties"])
+                    readiness = metadata.get("readiness_score", metadata.get("linux_readiness_score"))
+                    if isinstance(readiness, (int, float)) and not isinstance(readiness, bool):
+                        lines.append(f"- Readiness: **{readiness:.2f}/100**")
+                    certificate = metadata.get("certificate_status")
+                    if isinstance(certificate, str) and certificate:
+                        lines.append(f"- Certificate: `{markdown_code(certificate)}`")
+                try:
+                    with open(summary_path, "a", encoding="utf-8") as summary_file:
+                        summary_file.write("\n".join(lines) + "\n")
+                except OSError:
+                    print("WorksOnMyMachine: unable to write the step summary.", file=sys.stderr)
+        PY
+          then
+            printf '%s\n' 'WorksOnMyMachine could not publish annotations or the step summary.' >&2
+          fi
+        fi
         exit "${status}"

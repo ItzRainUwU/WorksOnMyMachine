@@ -2300,6 +2300,17 @@ pre,
   line-height: 1.55;
 }
 
+.issue-detail-section.explanation-callout {
+  padding: 10px;
+  background: rgba(34, 211, 238, 0.045);
+  border: 1px solid rgba(34, 211, 238, 0.17);
+  border-radius: 5px;
+}
+
+.issue-detail-section.explanation-callout > p {
+  color: #c9e8f0;
+}
+
 .evidence-list {
   display: grid;
   gap: 5px;

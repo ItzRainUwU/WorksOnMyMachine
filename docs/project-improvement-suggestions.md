@@ -110,7 +110,7 @@ Move portability checks into independently versioned rule packs, such as:
 Every finding should include a rule ID, rule version, confidence, evidence,  
 remediation, and whether the fix is automatic, staged, or manual.
 
-### 5. Add “Explain this finding” details
+### 5. [DONE] Add “Explain this finding” details
 
 For every finding, show:
 
@@ -121,6 +121,11 @@ For every finding, show:
 - The proposed fix
 - Whether the fix was applied
 - How the after-scan verified the result
+
+**Completed 2026-10-16:** The API and dashboard issue drawer now provide
+bounded source context, rule/category/severity, detection rationale,
+cross-platform scenario, redacted evidence, remediation, fixed/open status,
+and post-heal after-scan verification.
 
 ### 6. Add repository profiles
 
@@ -181,7 +186,7 @@ contrast checks, and accessible textual descriptions for the dependency graph.
 
 ## Security and Trust
 
-### 11. Add redacted secret detection
+### 11. [DONE] Add redacted secret detection
 
 Detect likely API keys, private keys, tokens, passwords, cloud credentials, and  
 accidentally committed `.env` files without exposing raw values.
@@ -193,6 +198,11 @@ AWS access key detected: AKIA••••••••••••••
 ```
 
 Raw secrets must never appear in reports, logs, certificates, or examples.
+
+**Completed 2026-10-16:** The scanner detects high-confidence credential-shaped
+assignments, provider tokens, PEM markers, cloud credentials, passwords, and
+committed `.env`-style files while redacting evidence and suppressing
+placeholders, documentation examples, lookups, and safe templates.
 
 ### 12. Add signed certificates
 
@@ -213,11 +223,15 @@ apply rollback protections remain in place.
 
 ## CI and Integrations
 
-### 14. Add GitHub annotations
+### 14. [DONE] Add GitHub annotations
 
 Enhance the existing SARIF and GitHub Action support with inline pull-request  
 annotations, workflow summaries, certificate and patch artifacts, readiness  
 checks, and a default “new findings only” mode.
+
+**Completed 2026-10-16:** The official action can emit escaped GitHub workflow
+annotations and a concise `GITHUB_STEP_SUMMARY`, with opt-out inputs and the
+existing report outputs preserved.
 
 ### 15. Add more CI templates
 
@@ -258,17 +272,25 @@ pinned Python project on Windows, Ubuntu, and macOS, installs locked
 dependencies, runs the offline test command, and conditionally checks tracked
 JavaScript syntax without requiring Docker.
 
-### 18. Add property-based tests
+### 18. [DONE] Add property-based tests
 
 Good candidates include path normalization, deterministic hashing, diff  
 generation, malformed parser input, and Docker stage selection. Tests should  
 prove that paths never escape the target root and ambiguous Docker stages are  
 never modified.
 
-### 19. Add golden fixtures
+**Completed 2026-10-16:** Deterministic standard-library generative tests now
+exercise path containment, malformed parser inputs, Merkle order independence,
+Docker stage ambiguity, and stable diff generation.
+
+### 19. [DONE] Add golden fixtures
 
 Maintain expected JSON, SARIF, certificate, and patch outputs for representative  
 targets. This will prevent accidental output-format drift.
+
+**Completed 2026-10-16:** Golden JSON, SARIF, certificate, and unified-patch
+fixtures now protect representative serialized outputs with normalization only
+for generated timestamps.
 
 ## Recommended Next Three
 

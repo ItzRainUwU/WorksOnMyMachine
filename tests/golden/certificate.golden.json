@@ -1,0 +1,15 @@
+{
+  "certificate_id": "cert-export",
+  "generated_at": "<timestamp>",
+  "root_hash": "root-hash",
+  "runtime": "python:3.11",
+  "dependency_lock_hash": null,
+  "verified": false,
+  "issues": [],
+  "file_nodes": [],
+  "dependency_lock_score": 0.0,
+  "linux_readiness_score": 82.5,
+  "dockerfile_hardened": false,
+  "verification_hash": "",
+  "is_cleanroom_certified": false
+}

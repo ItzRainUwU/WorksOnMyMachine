@@ -39,6 +39,7 @@ from .models import (
     LandmineIssue,
     AuditReport,
     ReproducibilityCertificate,
+    SeverityLevel,
 )
 from .repro_hash import (
     compare_certificates,
@@ -59,6 +60,14 @@ UPLOADS_DIR = PROJECT_ROOT / ".worksonmymachine" / "uploads"
 MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 MAX_ARCHIVE_FILES = 10_000
 MAX_EXTRACTED_BYTES = 500 * 1024 * 1024
+# Context is deliberately small enough for a drawer response and a log-safe
+# enough size for API consumers.  The source file itself remains capped below.
+MAX_CONTEXT_FILE_BYTES = 2_000_000
+MAX_CONTEXT_LINES = 7
+MAX_CONTEXT_LINE_CHARS = 500
+MAX_CONTEXT_TOTAL_CHARS = 4_000
+MAX_EXPLANATION_EVIDENCE = 12
+MAX_EXPLANATION_TEXT = 2_000
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
@@ -168,6 +177,29 @@ class IssueContextRequest(BaseModel):
     target: str = Field(min_length=1)
     file_path: str = Field(min_length=1)
     line_number: int | None = Field(default=None, ge=1)
+
+
+class FindingExplanationRequest(BaseModel):
+    """Request an explanation for one selected finding.
+
+    The flat fields keep this request compatible with the issue rows already
+    rendered by the dashboard.  ``issue`` is also accepted for API clients
+    that already retain a complete :class:`LandmineIssue` object.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    target: str = Field(min_length=1)
+    issue: LandmineIssue | None = None
+    issue_id: str | None = Field(default=None, min_length=1)
+    category: str | None = Field(default=None, min_length=1)
+    message: str | None = Field(default=None, min_length=1)
+    severity: str = "medium"
+    file_path: str | None = None
+    line_number: int | None = Field(default=None, ge=1)
+    remediation: str | None = None
+    evidence: list[str] = Field(default_factory=list)
+    auto_heal: bool = False
 
 
 @app.get("/health")
@@ -653,8 +685,33 @@ _BUILD_IGNORED_DIRECTORIES = (
     "node_modules",
 )
 _SECRET_OUTPUT = re.compile(
-    r"(?i)(\b(?:password|passwd|secret|token|api[_-]?key)\b\s*[=:]\s*)([^\s,;]+)"
+    r"(?i)(\b(?:[a-z_][a-z0-9_.-]*(?:password|passwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key)[a-z0-9_.-]*|password|passwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|authorization)\b\s*(?:=|:)(?:\s*bearer\s+)?)([^\s,;]+)"
 )
+_BEARER_OUTPUT = re.compile(r"(?i)(\bbearer\s+)([^\s,;]+)")
+_PEM_OUTPUT = re.compile(
+    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----"
+)
+_KNOWN_TOKEN_OUTPUT = re.compile(
+    r"(?i)\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"
+    r"|\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b"
+    r"|\bxox[baprs]-[A-Za-z0-9-]{10,}\b"
+    r"|\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}\b"
+    r"|\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b"
+    r"|\bAIza[A-Za-z0-9_-]{30,}\b"
+    r"|\bnpm_[A-Za-z0-9]{30,}\b"
+    r"|\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"
+)
+
+
+def _redact_sensitive_text(value: object, limit: int = MAX_EXPLANATION_TEXT) -> str:
+    """Redact common assignment and bearer-token values before API output."""
+
+    text = str(value or "")
+    text = _PEM_OUTPUT.sub("[REDACTED PRIVATE KEY]", text)
+    text = _SECRET_OUTPUT.sub(r"\1[REDACTED]", text)
+    text = _BEARER_OUTPUT.sub(r"\1[REDACTED]", text)
+    text = _KNOWN_TOKEN_OUTPUT.sub("[REDACTED]", text)
+    return text[:limit]
 
 
 def _redact_build_output(value: str, limit: int = 12000) -> str:
@@ -856,18 +913,24 @@ def verify_build(request: BuildVerificationRequest) -> BuildVerification:
 def issue_context(request: IssueContextRequest) -> dict[str, object]:
     """Return bounded source context for a finding inside a selected target."""
 
-    raw_path = request.file_path.strip()
+    target_path = _resolve_context_target(request.target, request.file_path)
+    return _read_bounded_context(
+        request.target,
+        target_path,
+        request.file_path,
+        request.line_number,
+        missing_status=404,
+    )
+
+
+def _resolve_context_target(target: str, file_path: str) -> tuple[Path, str, list[str]]:
+    """Resolve a target and validate a relative source path before reading it."""
+
+    raw_path = file_path.strip()
     parts = raw_path.split("/")
-    if (
-        not raw_path
-        or "\\" in raw_path
-        or raw_path.startswith("/")
-        or (len(parts[0]) >= 2 and parts[0][1] == ":")
-        or any(part in {"", ".", ".."} for part in parts)
-    ):
-        raise HTTPException(status_code=400, detail="file_path must be a normalized relative POSIX path")
+    _validate_context_path(raw_path, parts)
     try:
-        target_path = _resolve_target(request.target)
+        target_path = _resolve_target(target)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     root = target_path.resolve()
@@ -876,22 +939,305 @@ def issue_context(request: IssueContextRequest) -> dict[str, object]:
         source.relative_to(root)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="file_path must remain inside the target") from exc
-    if not source.is_file() or source.stat().st_size > 2_000_000:
-        raise HTTPException(status_code=404, detail="source file is unavailable for context")
+    return root, raw_path, parts
+
+
+def _validate_context_path(raw_path: str, parts: list[str] | None = None) -> None:
+    """Reject host-absolute, traversal, and non-normalized source paths."""
+
+    parts = parts if parts is not None else raw_path.split("/")
+    if (
+        not raw_path
+        or "\\" in raw_path
+        or raw_path.startswith("/")
+        or (len(parts[0]) >= 2 and parts[0][1] == ":")
+        or any(part in {"", ".", ".."} for part in parts)
+    ):
+        raise HTTPException(status_code=400, detail="file_path must be a normalized relative POSIX path")
+
+
+def _read_bounded_context(
+    target: str,
+    context_target: tuple[Path, str, list[str]],
+    file_path: str,
+    line_number: int | None,
+    *,
+    missing_status: int | None,
+) -> dict[str, object]:
+    """Read a small, redacted source window without crossing the target root."""
+
+    root, raw_path, parts = context_target
+    source = (root / Path(*parts)).resolve()
+    try:
+        source.relative_to(root)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="file_path must remain inside the target") from exc
+    try:
+        source_size = source.stat().st_size if source.is_file() else -1
+    except OSError:
+        source_size = -1
+    if source_size < 0 or source_size > MAX_CONTEXT_FILE_BYTES:
+        if missing_status is not None:
+            raise HTTPException(status_code=missing_status, detail="source file is unavailable for context")
+        return {
+            "available": False,
+            "target": target,
+            "file_path": raw_path,
+            "line_number": line_number,
+            "reason": "source file is unavailable for bounded context",
+        }
     try:
         lines = source.read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeError) as exc:
-        raise HTTPException(status_code=404, detail="source file is unreadable") from exc
-    center = request.line_number or 1
+        if missing_status is not None:
+            raise HTTPException(status_code=missing_status, detail="source file is unreadable") from exc
+        return {
+            "available": False,
+            "target": target,
+            "file_path": raw_path,
+            "line_number": line_number,
+            "reason": "source file is unreadable",
+        }
+    center = line_number or 1
     start = max(1, center - 3)
-    end = min(len(lines), center + 3)
+    end = min(len(lines), center + 3, start + MAX_CONTEXT_LINES - 1)
+    bounded_lines: list[dict[str, object]] = []
+    total_chars = 0
+    for index in range(start, end + 1):
+        text = _redact_sensitive_text(lines[index - 1], MAX_CONTEXT_LINE_CHARS)
+        remaining = MAX_CONTEXT_TOTAL_CHARS - total_chars
+        if remaining <= 0:
+            break
+        if len(text) > remaining:
+            text = text[:remaining]
+        bounded_lines.append({"number": index, "text": text})
+        total_chars += len(text)
+    return {
+        "available": True,
+        "target": target,
+        "file_path": raw_path,
+        "line_number": line_number,
+        "start_line": start,
+        "end_line": bounded_lines[-1]["number"] if bounded_lines else start - 1,
+        "lines": bounded_lines,
+    }
+
+
+def _issue_key(issue: LandmineIssue) -> tuple[object, ...]:
+    """Return the stable fields used to match a finding across scans."""
+
+    return (issue.issue_id, issue.file_path, issue.line_number, issue.message)
+
+
+def _matching_issue(issues: list[LandmineIssue], selected: LandmineIssue) -> LandmineIssue | None:
+    """Match a selected row to scan evidence, tolerating small message drift."""
+
+    selected_key = _issue_key(selected)
+    exact = next((issue for issue in issues if _issue_key(issue) == selected_key), None)
+    if exact is not None:
+        return exact
+    location = (selected.issue_id, selected.file_path, selected.line_number)
+    located = [
+        issue
+        for issue in issues
+        if (issue.issue_id, issue.file_path, issue.line_number) == location
+    ]
+    if len(located) == 1:
+        return located[0]
+    same_rule = [issue for issue in issues if issue.issue_id == selected.issue_id]
+    return same_rule[0] if len(same_rule) == 1 else None
+
+
+def _scenario_for_issue(issue: LandmineIssue) -> str:
+    """Describe the likely cross-platform failure without inventing runtime facts."""
+
+    text = " ".join(
+        [issue.issue_id, issue.category, issue.message, *issue.evidence]
+    ).lower()
+    if "secret" in text or "token" in text or "password" in text or "credential" in text:
+        return "A credential committed in source control can be exposed in every build environment; rotate it and inject it through the deployment environment instead."
+    if "case" in text or "import" in text:
+        return "A case-insensitive development filesystem may resolve this import, while Linux filesystems commonly require the exact on-disk casing."
+    if "crlf" in text or "line ending" in text:
+        return "Windows line endings can change shell parsing or generated-file hashes on Linux and macOS, making the same checkout behave differently."
+    if "backslash" in text or "windows" in text or "drive" in text or "absolute" in text or "path" in text:
+        return "A host-specific path can work on the developer's Windows machine but fail in a Linux or macOS clean room where that drive, separator, or home directory does not exist."
+    if "docker" in text or "base" in text or "apt" in text or "native" in text or "openssl" in text:
+        return "A host-provided native toolchain or floating container base can differ across Linux distributions and CPU architectures, causing a clean build to resolve different headers or binaries."
+    if "lock" in text or "pin" in text or "depend" in text or "version" in text:
+        return "An unpinned dependency can resolve a different transitive graph on another operating system or on a later install, so the build is not reproducible across clean environments."
+    return "The detected project assumption can resolve differently on another operating system or filesystem, so a clean-room build may fail or produce different artifacts."
+
+
+def _selected_issue(request: FindingExplanationRequest, scanned: list[LandmineIssue]) -> LandmineIssue:
+    """Select a complete issue row from the request or the target scan."""
+
+    if request.issue is not None:
+        return _matching_issue(scanned, request.issue) or request.issue
+    if request.issue_id:
+        found = next((issue for issue in scanned if issue.issue_id == request.issue_id), None)
+        if found is not None:
+            return found
+    if not request.issue_id or not request.category or not request.message:
+        raise HTTPException(
+            status_code=400,
+            detail="provide issue or issue_id, category, and message",
+        )
+    try:
+        severity = SeverityLevel(str(request.severity).lower())
+        issue_data: dict[str, object] = {
+            "issue_id": request.issue_id,
+            "category": request.category,
+            "message": request.message,
+            "severity": severity,
+            "evidence": request.evidence,
+        }
+        if request.file_path is not None:
+            issue_data["file_path"] = request.file_path
+        if request.line_number is not None:
+            issue_data["line_number"] = request.line_number
+        if request.remediation is not None:
+            issue_data["remediation"] = request.remediation
+        return LandmineIssue(**issue_data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="severity must be low, medium, high, or critical") from exc
+
+
+def _safe_issue_payload(issue: LandmineIssue) -> dict[str, object]:
+    """Return finding metadata suitable for an explanation response."""
+
+    return {
+        "issue_id": _redact_sensitive_text(issue.issue_id),
+        "category": _redact_sensitive_text(issue.category),
+        "message": _redact_sensitive_text(issue.message),
+        "severity": issue.severity.value,
+        "file_path": _redact_sensitive_text(issue.file_path) if issue.file_path else None,
+        "line_number": issue.line_number,
+        "remediation": _redact_sensitive_text(issue.remediation) if issue.remediation else None,
+        "evidence": [
+            _redact_sensitive_text(item)
+            for item in issue.evidence[:MAX_EXPLANATION_EVIDENCE]
+        ],
+    }
+
+
+@app.post("/api/v1/finding-explanation")
+@app.post("/api/v1/explain-finding", include_in_schema=False)
+@app.post("/api/v1/issue-explanation", include_in_schema=False)
+def finding_explanation(request: FindingExplanationRequest) -> dict[str, object]:
+    """Explain one selected finding using bounded source and after-scan evidence."""
+
+    if request.file_path is not None:
+        _validate_context_path(request.file_path.strip())
+    try:
+        target_path = _resolve_target(request.target)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # The scan is deterministic and never changes the source tree. Auto-heal
+    # uses the same copy-on-write audit path as the existing dashboard action.
+    report = run_full_audit(target_path, auto_heal=request.auto_heal)
+    baseline = list(report.before_certificate.issues if report.before_certificate else report.issues)
+    selected = _selected_issue(request, baseline)
+    baseline_match = _matching_issue(baseline, selected)
+    after = list(report.after_certificate.issues) if report.after_certificate else []
+    after_match = _matching_issue(after, selected) if report.after_certificate else None
+
+    if report.after_certificate is None:
+        status = "not_evaluated"
+        status_detail = "Run Auto-Heal & Certify to perform a post-heal scan for this finding."
+    elif after_match is None:
+        if baseline_match is None:
+            status = "not_found"
+            status_detail = "The selected finding was not present in the baseline scan for this target."
+        else:
+            status = "fixed"
+            status_detail = "The matching finding was absent from the post-heal scan of the staged copy."
+    else:
+        status = "open"
+        status_detail = "The matching finding remains in the post-heal scan of the staged copy."
+
+    verification = report.after_certificate or report.before_certificate
+    summary = report.post_heal_summary
+    after_scan: dict[str, object] = {
+        "performed": True,
+        "mode": "post-heal" if report.after_certificate is not None else "baseline",
+        "status": status,
+        "finding_present": after_match is not None if report.after_certificate is not None else baseline_match is not None,
+        "certificate_status": (
+            "certified" if verification and verification.is_cleanroom_certified else "not_certified"
+        ),
+        "verification_hash": verification.verification_hash if verification else "",
+        "readiness_score": verification.linux_readiness_score if verification else 0.0,
+        "dependency_lock_score": verification.dependency_lock_score if verification else 0.0,
+    }
+    if summary is not None:
+        after_scan["summary"] = {
+            "before_findings": summary.before_findings,
+            "fixed_findings": summary.fixed_findings,
+            "remaining_findings": summary.remaining_findings,
+            "changed_files": summary.changed_files[:MAX_EXPLANATION_EVIDENCE],
+            "readiness_delta": summary.readiness_delta,
+            "dependency_score_delta": summary.dependency_score_delta,
+            "certificate_status": summary.certificate_status,
+            "blocking_reasons": [
+                _redact_sensitive_text(reason)
+                for reason in summary.blocking_reasons[:MAX_EXPLANATION_EVIDENCE]
+            ],
+        }
+
+    source_context: dict[str, object] | None = None
+    if selected.file_path:
+        context_target = _resolve_context_target(request.target, selected.file_path)
+        source_context = _read_bounded_context(
+            request.target,
+            context_target,
+            selected.file_path,
+            selected.line_number,
+            missing_status=None,
+        )
+
+    safe_issue = _safe_issue_payload(selected)
+    evidence = list(safe_issue["evidence"])
+    evidence_text = "; ".join(str(item) for item in evidence[:3])
+    why_detected = (
+        f"Rule {safe_issue['issue_id']} detected this {safe_issue['category']} finding because "
+        f"{safe_issue['message']}"
+    )
+    if evidence_text:
+        why_detected += f" Evidence: {evidence_text}."
+    else:
+        why_detected += "."
+    scenario = _redact_sensitive_text(_scenario_for_issue(selected))
     return {
         "target": request.target,
-        "file_path": raw_path,
-        "line_number": request.line_number,
-        "start_line": start,
-        "end_line": end,
-        "lines": [{"number": index, "text": lines[index - 1]} for index in range(start, end + 1)],
+        "issue": safe_issue,
+        "rule": {
+            "id": safe_issue["issue_id"],
+            "category": safe_issue["category"],
+            "severity": safe_issue["severity"],
+        },
+        "rule_id": safe_issue["issue_id"],
+        "category": safe_issue["category"],
+        "why_detected": _redact_sensitive_text(why_detected),
+        "source_context": source_context,
+        "source_lines": list(source_context.get("lines", [])) if source_context else [],
+        "evidence": evidence,
+        "likely_cross_platform_scenario": scenario,
+        "cross_platform_scenario": scenario,
+        "remediation": safe_issue["remediation"] or "Review the portability assumption and replace the host-specific behavior with a deterministic project-relative configuration.",
+        "fixed": status == "fixed",
+        "fix_applied": status == "fixed",
+        "status": {
+            "state": status,
+            "fixed": status == "fixed",
+            "post_heal_requested": bool(request.auto_heal),
+            "post_heal_scanned": report.after_certificate is not None,
+            "detail": status_detail,
+        },
+        "post_heal_status": status,
+        "after_scan_verification": after_scan,
+        "after_scan": after_scan,
     }
 
 

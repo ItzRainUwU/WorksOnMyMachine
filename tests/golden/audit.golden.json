@@ -1,0 +1,64 @@
+{
+  "target": "fixture",
+  "scanned_at": "<timestamp>",
+  "reproducible": false,
+  "issues": [
+    {
+      "issue_id": "REQ-UNPINNED",
+      "category": "DEPENDENCY_LOCK",
+      "message": "Dependency is not pinned.",
+      "severity": "high",
+      "file_path": "requirements.txt",
+      "line_number": 1,
+      "remediation": null,
+      "evidence": []
+    },
+    {
+      "issue_id": "PATH-BACKSLASH",
+      "category": "BACKSLASH_PATH",
+      "message": "Backslash path literal is not portable.",
+      "severity": "low",
+      "file_path": "app.py",
+      "line_number": 4,
+      "remediation": null,
+      "evidence": []
+    }
+  ],
+  "diagnostics": [],
+  "dockerfile_patches": [],
+  "merkle_root": null,
+  "certificate": {
+    "certificate_id": "cert-export",
+    "generated_at": "<timestamp>",
+    "root_hash": "root-hash",
+    "runtime": "python:3.11",
+    "dependency_lock_hash": null,
+    "verified": false,
+    "issues": [],
+    "file_nodes": [],
+    "dependency_lock_score": 0.0,
+    "linux_readiness_score": 82.5,
+    "dockerfile_hardened": false,
+    "verification_hash": "",
+    "is_cleanroom_certified": false
+  },
+  "before_certificate": null,
+  "after_certificate": null,
+  "dockerfile_patch": null,
+  "unified_diffs": [],
+  "compiler_diagnostics": [],
+  "timeline": [],
+  "dependency_telemetry": {
+    "total": 0,
+    "direct": 0,
+    "transitive": 0,
+    "pinned": 0,
+    "floating": 0,
+    "manifests": [],
+    "vulnerability_status": "unavailable",
+    "vulnerabilities": []
+  },
+  "suppressed_issue_count": 0,
+  "baseline_applied": false,
+  "post_heal_summary": null
+}

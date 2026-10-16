@@ -16,6 +16,7 @@
     issueFilter: "all",
     issueSearch: "",
     selectedHealedFilePath: null,
+    issueDetailRequestId: 0,
     activeView: "dashboard",
     events: [{ message: "clean room ready", level: "success", time: new Date() }],
     busy: false,
@@ -662,8 +663,11 @@
 
   function renderIssueDetail(issue) {
     if (!issue) return;
+    var requestId = state.issueDetailRequestId + 1;
+    state.issueDetailRequestId = requestId;
     setText("issue-detail-title", issue.message || issue.issue_id || "Issue detail");
     setText("issue-detail-id", issue.issue_id || "unclassified");
+    setText("issue-detail-rule", issue.issue_id || "unclassified");
     setText("issue-detail-severity", String(issue.severity || "medium").toUpperCase());
     setText("issue-detail-category", issue.category || "unclassified");
     setText("issue-detail-location", issueLocation(issue));
@@ -677,21 +681,64 @@
       status.classList.toggle("status-open", !fixed);
     }
     setText("issue-detail-state", !state.report || !state.report.after_certificate ? "Not evaluated; this was a scan-only result." : fixed ? "Fixed in the staged copy; no matching post-heal finding remains." : "Still present after auto-heal; remains OPEN.");
+    setText("issue-detail-why", "Loading rule explanation...");
+    setText("issue-detail-scenario", "Loading cross-platform scenario...");
+    setText("issue-detail-verification", "Loading after-scan verification...");
     var evidence = byId("issue-detail-evidence");
-    var evidenceItems = safeArray(issue.evidence);
-    if (evidence) evidence.innerHTML = evidenceItems.length ? evidenceItems.map(function (item) { return "<li>" + escapeHtml(item) + "</li>"; }).join("") : "<li>No raw evidence recorded.</li>";
+    if (evidence) evidence.innerHTML = "<li>Loading redacted evidence...</li>";
     var diff = byId("issue-detail-diff");
     var diffValue = issueDiff(issue);
     if (diff) diff.innerHTML = diffValue ? diffText(diffValue) : "No file diff recorded for this issue.";
     var source = byId("issue-detail-source");
     if (source) source.textContent = issue.file_path ? "Loading source context..." : "This finding has no file path context.";
     setDrawerView("issue");
-    if (!issue.file_path) return;
-    request("/api/v1/issue-context", { method: "POST", body: { target: state.target, file_path: issue.file_path, line_number: issue.line_number || null } }).then(function (context) {
-      if (!source) return;
-      source.textContent = safeArray(context.lines).map(function (line) { return String(line.number).padStart(4, " ") + " | " + line.text; }).join("\n") || "No source context returned.";
+    var explanationIssue = Object.assign({}, issue);
+    delete explanationIssue.postHeal;
+    request("/api/v1/finding-explanation", { method: "POST", body: { target: state.target, issue: explanationIssue, auto_heal: Boolean(state.auditWasAutoHealed) } }).then(function (explanation) {
+      if (requestId !== state.issueDetailRequestId) return;
+      setText("issue-detail-id", explanation.rule_id || explanation.issue && explanation.issue.issue_id || issue.issue_id || "unclassified");
+      setText("issue-detail-rule", explanation.rule && explanation.rule.id || explanation.rule_id || "unclassified");
+      setText("issue-detail-category", explanation.category || explanation.rule && explanation.rule.category || "unclassified");
+      setText("issue-detail-message", explanation.issue && explanation.issue.message || issue.message || "No issue message returned.");
+      setText("issue-detail-why", explanation.why_detected || "No rule explanation returned.");
+      setText("issue-detail-scenario", explanation.likely_cross_platform_scenario || "No cross-platform scenario returned.");
+      setText("issue-detail-remediation", explanation.remediation || "No remediation returned.");
+      var explanationStatus = explanation.status || {};
+      var stateLabel = explanationStatus.state || explanation.post_heal_status || "not_evaluated";
+      setText("issue-detail-state", explanationStatus.detail || stateLabel.replace(/_/g, " "));
+      if (status) {
+        status.textContent = stateLabel === "fixed" ? "FIXED" : stateLabel === "open" ? "OPEN" : stateLabel.replace(/_/g, " ").toUpperCase();
+        status.classList.toggle("status-fixed", stateLabel === "fixed");
+        status.classList.toggle("status-open", stateLabel !== "fixed");
+      }
+      var verification = explanation.after_scan_verification || {};
+      var verificationSummary = verification.summary || {};
+      var verificationText = verification.status ? String(verification.status).replace(/_/g, " ").toUpperCase() : "NOT EVALUATED";
+      if (verification.performed) verificationText += " / " + String(verification.mode || "scan") + " scan";
+      if (verification.certificate_status) verificationText += " / certificate " + verification.certificate_status;
+      if (verificationSummary.remaining_findings != null) verificationText += " / " + verificationSummary.remaining_findings + " remaining";
+      setText("issue-detail-verification", verificationText + (verification.verification_hash ? " / " + truncate(verification.verification_hash, 12, 0) : ""));
+      var explanationEvidence = safeArray(explanation.evidence || explanation.issue && explanation.issue.evidence);
+      if (evidence) evidence.innerHTML = explanationEvidence.length ? explanationEvidence.map(function (item) { return "<li>" + escapeHtml(item) + "</li>"; }).join("") : "<li>No redacted evidence recorded.</li>";
+      var context = explanation.source_context;
+      if (source) {
+        if (!context || context.available === false) source.textContent = context && context.reason ? context.reason : "This finding has no file path context.";
+        else source.textContent = safeArray(context.lines).map(function (line) { return String(line.number).padStart(4, " ") + " | " + line.text; }).join("\n") || "No source context returned.";
+      }
     }).catch(function (error) {
-      if (source) source.textContent = "Source context unavailable: " + error.message;
+      if (requestId !== state.issueDetailRequestId) return;
+      setText("issue-detail-why", "Explanation unavailable: " + error.message);
+      setText("issue-detail-scenario", "No cross-platform scenario returned.");
+      setText("issue-detail-verification", "After-scan verification unavailable.");
+      if (source) source.textContent = issue.file_path ? "Loading source context..." : "This finding has no file path context.";
+      if (issue.file_path) {
+        request("/api/v1/issue-context", { method: "POST", body: { target: state.target, file_path: issue.file_path, line_number: issue.line_number || null } }).then(function (context) {
+          if (requestId !== state.issueDetailRequestId || !source) return;
+          source.textContent = safeArray(context.lines).map(function (line) { return String(line.number).padStart(4, " ") + " | " + line.text; }).join("\n") || "No source context returned.";
+        }).catch(function (contextError) {
+          if (requestId === state.issueDetailRequestId && source) source.textContent = "Source context unavailable: " + contextError.message;
+        });
+      }
     });
   }
 

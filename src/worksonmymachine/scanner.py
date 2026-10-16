@@ -111,6 +111,83 @@ _WINDOWS_RESERVED_NAMES = frozenset(
     }
 )
 
+# Secret rules intentionally use bounded, high-signal forms.  In particular,
+# there is no catch-all "high entropy" rule: ordinary identifiers, hashes, and
+# documentation prose are too easy to mistake for credentials.  Values are
+# retained only long enough to create redacted evidence and are never placed in
+# an issue message or evidence item.
+_PEM_PRIVATE_KEY = re.compile(
+    r"-----BEGIN (?P<label>(?:ENCRYPTED |RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY)-----"
+)
+_AWS_ACCESS_KEY = re.compile(r"\b(?P<value>(?:AKIA|ASIA)[0-9A-Z]{16})\b")
+_GITHUB_TOKEN = re.compile(
+    r"\b(?P<value>(?:gh[pousr]_[A-Za-z0-9_]{30,}|github_pat_[A-Za-z0-9_]{20,}))\b"
+)
+_SLACK_TOKEN = re.compile(r"\b(?P<value>xox[baprs]-[A-Za-z0-9-]{10,})\b")
+_STRIPE_TOKEN = re.compile(
+    r"\b(?P<value>(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,})\b"
+)
+_OPENAI_TOKEN = re.compile(r"\b(?P<value>sk-(?:proj-)?[A-Za-z0-9_-]{20,})\b")
+_GOOGLE_API_KEY = re.compile(r"\b(?P<value>AIza[A-Za-z0-9_-]{30,})\b")
+_NPM_TOKEN = re.compile(r"\b(?P<value>npm_[A-Za-z0-9]{30,})\b")
+_JWT = re.compile(
+    r"\b(?P<value>eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"
+    r"\.[A-Za-z0-9_-]{10,})\b"
+)
+_BEARER_TOKEN = re.compile(
+    r"(?i)\bBearer\s+(?P<value>[A-Za-z0-9_./~+\-]{20,})\b"
+)
+_SECRET_ASSIGNMENT = re.compile(
+    r"(?ix)(?P<key>\b[A-Za-z_][A-Za-z0-9_-]*\b)\s*(?:=|:)\s*"
+    r"(?:[\"'](?P<quoted>[^\"'\r\n]*)[\"']|"
+    r"(?P<bare>[^\s,;#}\]]+))"
+)
+_SAFE_ENV_NAMES = frozenset(
+    {
+        ".env.example",
+        ".env.sample",
+        ".env.template",
+        ".env.defaults",
+        ".env.dist",
+    }
+)
+_SAFE_ENV_SUFFIXES = (".example", ".sample", ".template", ".defaults", ".dist")
+_DOCUMENTATION_SUFFIXES = frozenset({".md", ".mdx", ".rst", ".adoc"})
+_PLACEHOLDER_WORDS = frozenset(
+    {
+        "api-key",
+        "api_key",
+        "changeme",
+        "change-me",
+        "change_me",
+        "dummy",
+        "dummy-key",
+        "dummy_key",
+        "example",
+        "example-key",
+        "example_key",
+        "fake",
+        "invalid",
+        "none",
+        "null",
+        "password",
+        "placeholder",
+        "redacted",
+        "replace-me",
+        "replace_me",
+        "sample",
+        "secret",
+        "token",
+        "undefined",
+        "your-api-key",
+        "your_api_key",
+        "your-secret",
+        "your_secret",
+        "your-token",
+        "your_token",
+    }
+)
+
 
 @dataclass(frozen=True)
 class _CaseResolution:
@@ -713,6 +790,287 @@ def _scan_config(target: Path, path: Path, issues: list[LandmineIssue]) -> None:
             )
 
 
+def _is_env_style_file(path: Path) -> bool:
+    """Return whether *path* looks like a runtime dotenv file."""
+
+    name = path.name.casefold()
+    if name in _SAFE_ENV_NAMES or name.endswith(_SAFE_ENV_SUFFIXES):
+        return False
+    return name == ".env" or name.startswith(".env.") or name.endswith(".env")
+
+
+def _is_placeholder_secret(value: str) -> bool:
+    """Return whether a candidate is a documentation/configuration placeholder."""
+
+    candidate = value.strip().strip("\"'").strip()
+    if not candidate:
+        return True
+    folded = candidate.casefold()
+    if folded in _PLACEHOLDER_WORDS:
+        return True
+    words = set(re.split(r"[^a-z0-9]+", folded))
+    if words & {"dummy", "example", "fake", "invalid", "sample"}:
+        return True
+    if (
+        folded.endswith("example")
+        or "examplekey" in folded
+        or "placeholder" in folded
+        or "changeme" in folded.replace("-", "").replace("_", "")
+        or "notareal" in folded.replace("-", "").replace("_", "")
+        or folded.startswith(("your-", "your_", "replace-", "replace_"))
+    ):
+        return True
+    if candidate.startswith(("${", "{{", "<", "[")) or candidate.endswith(("}", ">")):
+        return True
+    if candidate.startswith(("$", "os.", "process.", "env.")):
+        return True
+    if any(marker in candidate for marker in ("••", "***", "…")):
+        return True
+    if len(set(candidate)) == 1:
+        return True
+    # AWS publishes this exact value in documentation; it is not a credential.
+    if folded == "akiaiosfodnn7example":
+        return True
+    return False
+
+
+def _is_documentation_example(path: Path, line: str, value: str) -> bool:
+    """Suppress clearly labelled examples while preserving real-secret scans."""
+
+    context = line.casefold()
+    if any(
+        marker in context
+        for marker in (
+            "example",
+            "placeholder",
+            "dummy",
+            "replace this",
+            "redacted",
+            "sample",
+            "not real",
+            "not a real",
+        )
+    ):
+        return True
+    path_parts = {part.casefold() for part in path.parts}
+    example_path = bool(
+        path_parts
+        & {"doc", "docs", "documentation", "example", "examples", "sample", "samples"}
+    )
+    if path.suffix.casefold() not in _DOCUMENTATION_SUFFIXES and not example_path:
+        return False
+    return _is_placeholder_secret(value)
+
+
+def _secret_kind_for_key(key: str, value: str) -> tuple[str, str] | None:
+    """Map a credential-shaped assignment to ``(issue id, display label)``."""
+
+    normalized = re.sub(r"[^a-z0-9]", "", key.casefold())
+    if normalized == "googleapplicationcredentials" and (
+        value.casefold().endswith((".json", ".jsonc"))
+        or value.lstrip().startswith(("/", "./", "../"))
+    ):
+        # This conventional variable usually points to a service-account file;
+        # the path is not itself a credential value.
+        return None
+    if normalized.endswith(("path", "file", "filename")):
+        # Likewise, *_KEY_FILE and *_PASSWORD_PATH are secret references rather
+        # than the material being protected.
+        return None
+    if normalized in {"databaseurl"}:
+        # A connection URL alone is ordinary configuration.  Only report it
+        # when it contains user-info, where a password can be embedded.
+        if "@" not in value or "://" not in value:
+            return None
+        return "SECRET-PASSWORD", "password"
+    if any(
+        marker in normalized
+        for marker in (
+            "awsaccesskeyid",
+            "awssecretaccesskey",
+            "awssessiontoken",
+            "azureclientsecret",
+            "azurestoragekey",
+            "azureconnectionstring",
+            "googleapplicationcredentials",
+            "googleprivatekey",
+            "gcpcredentials",
+            "gcpprivatekey",
+            "accountkey",
+            "cloudkey",
+            "cloudsecret",
+            "cloudtoken",
+            "cloudcredential",
+            "credential",
+            "credentials",
+            "connectionstring",
+            "storagekey",
+        )
+    ):
+        return "SECRET-CLOUD-CREDENTIAL", "cloud credential"
+    if "privatekey" in normalized and not normalized.endswith(
+        ("keyid", "keyname", "path", "file", "filename")
+    ):
+        return "SECRET-PRIVATE-KEY", "private key"
+    if any(marker in normalized for marker in ("password", "passwd", "pwd")):
+        return "SECRET-PASSWORD", "password"
+    if any(
+        marker in normalized
+        for marker in ("token", "accesstoken", "authtoken", "bearertoken")
+    ):
+        return "SECRET-TOKEN", "token"
+    if any(marker in normalized for marker in ("apikey", "clientsecret", "secret")):
+        return "SECRET-API-KEY", "API key"
+    return None
+
+
+def _redacted_secret_evidence(label: str, value: str) -> str:
+    """Format evidence with a short prefix and fixed-ish bullet padding."""
+
+    candidate = value.strip().strip("\"'").strip()
+    prefix = candidate[:4] if len(candidate) >= 4 else candidate[:2]
+    bullet_count = min(16, max(8, len(candidate) - len(prefix)))
+    return f"{label} detected: {prefix}{'•' * bullet_count}"
+
+
+def _append_secret_issue(
+    target: Path,
+    path: Path,
+    issues: list[LandmineIssue],
+    *,
+    issue_id: str,
+    label: str,
+    line_number: int | None,
+    evidence: str,
+) -> None:
+    """Append a secret finding without accepting raw candidate material."""
+
+    issues.append(
+        _issue(
+            target,
+            path,
+            issue_id,
+            "SECRET_EXPOSURE",
+            f"Likely {label} material is committed in plaintext; rotate it and remove it from source control.",
+            SeverityLevel.CRITICAL,
+            line_number=line_number,
+            remediation="Remove the credential from source control, rotate it, and use a secret store or environment injection.",
+            evidence=[evidence],
+        )
+    )
+
+
+def _scan_secrets(target: Path, path: Path, issues: list[LandmineIssue]) -> None:
+    """Find high-confidence credentials while keeping their values redacted."""
+
+    name = path.name.casefold()
+    if name in _SAFE_ENV_NAMES or name.endswith(_SAFE_ENV_SUFFIXES):
+        return
+    if _is_env_style_file(path):
+        # The filename itself is useful evidence and contains no credential
+        # value.  Templates are excluded above; real dotenv files are not.
+        _append_secret_issue(
+            target,
+            path,
+            issues,
+            issue_id="SECRET-ENV-FILE",
+            label="dotenv file",
+            line_number=None,
+            evidence=f"Environment file detected: {path.name}",
+        )
+
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return
+    if not text or "\x00" in text:
+        return
+
+    # Keep value spans only for in-memory overlap suppression.  They are never
+    # copied into an issue, exception, log, or report.
+    value_spans: list[tuple[int, int]] = []
+    for match in _SECRET_ASSIGNMENT.finditer(text):
+        key = match.group("key")
+        value = match.group("quoted")
+        if value is None:
+            value = match.group("bare") or ""
+            # A bare Python/JavaScript expression such as ``os.getenv(...)``
+            # or ``settings.API_KEY`` is a lookup, not a committed credential.
+            # Dotenv and YAML bare values remain eligible.
+            if any(character in value for character in "()[]"):
+                continue
+            if path.suffix.lower() in _SOURCE_SUFFIXES and re.fullmatch(
+                r"[A-Za-z_][A-Za-z0-9_.]*", value
+            ):
+                continue
+        value_start = match.start("quoted") if match.group("quoted") is not None else match.start("bare")
+        value_end = match.end("quoted") if match.group("quoted") is not None else match.end("bare")
+        if _is_placeholder_secret(value) or len(value.strip()) < 8:
+            continue
+        line_start = text.rfind("\n", 0, match.start()) + 1
+        line_end = text.find("\n", match.end())
+        line = text[line_start:] if line_end < 0 else text[line_start:line_end]
+        if _is_documentation_example(path, line, value):
+            continue
+        kind = _secret_kind_for_key(key, value)
+        if kind is None:
+            continue
+        issue_id, label = kind
+        if _PEM_PRIVATE_KEY.search(value):
+            issue_id, label = "SECRET-PRIVATE-KEY", "private key"
+        value_spans.append((value_start, value_end))
+        _append_secret_issue(
+            target,
+            path,
+            issues,
+            issue_id=issue_id,
+            label=label,
+            line_number=_line_number(text, match.start()),
+            evidence=_redacted_secret_evidence(label, value),
+        )
+
+    provider_patterns: tuple[tuple[re.Pattern[str], str, str], ...] = (
+        (_PEM_PRIVATE_KEY, "SECRET-PRIVATE-KEY", "private key"),
+        (_AWS_ACCESS_KEY, "SECRET-CLOUD-CREDENTIAL", "AWS access key"),
+        (_GITHUB_TOKEN, "SECRET-TOKEN", "token"),
+        (_SLACK_TOKEN, "SECRET-TOKEN", "token"),
+        (_STRIPE_TOKEN, "SECRET-API-KEY", "API key"),
+        (_OPENAI_TOKEN, "SECRET-API-KEY", "API key"),
+        (_GOOGLE_API_KEY, "SECRET-API-KEY", "API key"),
+        (_NPM_TOKEN, "SECRET-TOKEN", "token"),
+        (_JWT, "SECRET-TOKEN", "token"),
+        (_BEARER_TOKEN, "SECRET-TOKEN", "token"),
+    )
+    for pattern, issue_id, label in provider_patterns:
+        for match in pattern.finditer(text):
+            value = match.group("value") if "value" in match.groupdict() else match.group(0)
+            if pattern is _PEM_PRIVATE_KEY:
+                value = match.group("label")
+            if _is_placeholder_secret(value):
+                continue
+            if any(start <= match.start() < end or start < match.end() <= end for start, end in value_spans):
+                continue
+            line_start = text.rfind("\n", 0, match.start()) + 1
+            line_end = text.find("\n", match.end())
+            line = text[line_start:] if line_end < 0 else text[line_start:line_end]
+            if _is_documentation_example(path, line, value):
+                continue
+            evidence = (
+                "Private key material detected: [REDACTED]"
+                if pattern is _PEM_PRIVATE_KEY
+                else _redacted_secret_evidence(label, value)
+            )
+            _append_secret_issue(
+                target,
+                path,
+                issues,
+                issue_id=issue_id,
+                label=label,
+                line_number=_line_number(text, match.start()),
+                evidence=evidence,
+            )
+
+
 def _env_keys(path: Path) -> set[str]:
     try:
         text = path.read_text(encoding="utf-8")
@@ -1295,6 +1653,7 @@ def scan_repository(target_path: Path) -> list[LandmineIssue]:
             _scan_requirements(target, path, issues)
         if path.name.lower() == "dockerfile" or path.name.lower().startswith("dockerfile."):
             _scan_dockerfile(target, path, issues)
+        _scan_secrets(target, path, issues)
     _scan_tracked_shell_modes(
         target, issues, {_relative(target, path) for path in files}
     )

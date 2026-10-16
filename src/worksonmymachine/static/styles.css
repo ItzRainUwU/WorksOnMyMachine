@@ -726,6 +726,101 @@ pre,
   font-size: 9px;
 }
 
+.upload-divider {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 0 9px;
+  color: #53657e;
+  font-family: var(--mono);
+  font-size: 8px;
+  letter-spacing: 0.12em;
+}
+
+.upload-divider::before,
+.upload-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: #1a2a42;
+}
+
+.zip-dropzone {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 54px;
+  padding: 8px 10px;
+  color: #9fb0c4;
+  background: rgba(34, 211, 238, 0.025);
+  border: 1px dashed #2b4261;
+  border-radius: 6px;
+  cursor: pointer;
+  outline: none;
+  transition: color 140ms ease, background 140ms ease, border-color 140ms ease;
+}
+
+.zip-dropzone:hover,
+.zip-dropzone:focus-visible,
+.zip-dropzone.is-dragging {
+  color: #d9fbff;
+  background: rgba(34, 211, 238, 0.09);
+  border-color: rgba(34, 211, 238, 0.7);
+}
+
+.zip-dropzone.is-uploading {
+  cursor: progress;
+  opacity: 0.7;
+}
+
+.zip-dropzone-icon {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  color: var(--cyan);
+  background: rgba(34, 211, 238, 0.08);
+  border-radius: 5px;
+}
+
+.zip-dropzone-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.zip-dropzone-copy strong {
+  color: inherit;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.zip-dropzone-copy small {
+  color: #718096;
+  font-size: 9px;
+}
+
+.zip-upload-status {
+  min-height: 14px;
+  margin-top: 6px;
+  color: #718096;
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.zip-upload-status.is-loading {
+  color: var(--cyan);
+}
+
+.zip-upload-status.is-success {
+  color: var(--emerald-bright);
+}
+
+.zip-upload-status.is-error {
+  color: var(--red-soft);
+}
+
 .button {
   display: inline-flex;
   align-items: center;

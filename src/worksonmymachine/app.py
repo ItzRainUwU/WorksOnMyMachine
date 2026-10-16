@@ -5,12 +5,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 import time
+import unicodedata
 import uuid
+import zipfile
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
@@ -52,6 +55,10 @@ app = FastAPI(
 )
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+UPLOADS_DIR = PROJECT_ROOT / ".worksonmymachine" / "uploads"
+MAX_UPLOAD_BYTES = 100 * 1024 * 1024
+MAX_ARCHIVE_FILES = 10_000
+MAX_EXTRACTED_BYTES = 500 * 1024 * 1024
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
@@ -77,6 +84,19 @@ class ScanResponse(BaseModel):
     issues: list[LandmineIssue]
     category_breakdown: dict[str, int]
     readiness_score: float
+
+
+class UploadResponse(BaseModel):
+    """Metadata for a ZIP archive extracted into the managed upload area."""
+
+    target: str
+    path: str
+    upload_id: str
+    filename: str
+    content_type: str | None = None
+    file_count: int = Field(ge=0)
+    directory_count: int = Field(ge=0)
+    total_size_bytes: int = Field(ge=0)
 
 
 class ParseLogRequest(BaseModel):
@@ -188,6 +208,7 @@ def targets(scope: str = "sandbox") -> dict[str, object]:
             for directory in sorted(sandbox.iterdir(), key=lambda item: item.name)
             if directory.is_dir() and not directory.name.startswith(".")
         )
+    candidates.extend(_managed_upload_targets())
     for directory in sorted(workspace.iterdir(), key=lambda item: item.name):
         if not directory.is_dir() or directory.name.startswith("."):
             continue
@@ -197,6 +218,208 @@ def targets(scope: str = "sandbox") -> dict[str, object]:
         "targets": sorted(set(candidates)),
         "default_target": workspace_config.target_paths[0] if workspace_config.target_paths else "workspace",
     }
+
+
+def _upload_root() -> Path:
+    """Return the managed upload directory and ensure it stays in the workspace."""
+
+    workspace = PROJECT_ROOT.resolve()
+    root = UPLOADS_DIR.resolve()
+    try:
+        root.relative_to(workspace)
+    except ValueError as exc:
+        raise RuntimeError("upload directory must remain inside the workspace") from exc
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _archive_path(name: str, *, directory: bool) -> str:
+    """Validate and normalize one ZIP member name as a POSIX path."""
+
+    normalized = unicodedata.normalize("NFC", name)
+    if not normalized or "\x00" in normalized or "\\" in normalized:
+        raise ValueError("archive contains a non-normalized path")
+    if normalized.startswith("/") or (
+        len(normalized) >= 2 and normalized[1] == ":"
+    ):
+        raise ValueError("archive contains an absolute path")
+
+    parts = normalized.split("/")
+    if directory and parts[-1] == "":
+        parts.pop()
+    if not parts or any(not part or part == "." or part == ".." for part in parts):
+        raise ValueError("archive contains a traversal or non-normalized path")
+    return "/".join(parts)
+
+
+def _validate_archive(archive: zipfile.ZipFile) -> tuple[list[tuple[zipfile.ZipInfo, str, bool]], int]:
+    """Validate ZIP members before writing any extracted data."""
+
+    infos = archive.infolist()
+    if not infos:
+        raise ValueError("archive is empty")
+    if len(infos) > MAX_ARCHIVE_FILES:
+        raise ValueError(f"archive contains more than {MAX_ARCHIVE_FILES} entries")
+
+    members: list[tuple[zipfile.ZipInfo, str, bool]] = []
+    seen: dict[str, str] = {}
+    component_spellings: dict[tuple[str, int, str], str] = {}
+    file_paths: set[str] = set()
+    total_size = 0
+    for info in infos:
+        mode = (info.external_attr >> 16) & 0xFFFF
+        if stat.S_ISLNK(mode):
+            raise ValueError("archive contains a symlink")
+        directory = info.is_dir() or info.filename.endswith("/")
+        path = _archive_path(info.filename, directory=directory)
+        key = path.casefold()
+        if key in seen:
+            raise ValueError(f"archive contains duplicate or conflicting path: {path}")
+        seen[key] = path
+        parts = path.split("/")
+        for index, part in enumerate(parts):
+            component_key = ("/".join(parts[:index]).casefold(), index, part.casefold())
+            previous = component_spellings.setdefault(component_key, part)
+            if previous != part:
+                raise ValueError(f"archive contains duplicate or conflicting path: {path}")
+        if not directory:
+            if info.file_size < 0:
+                raise ValueError("archive contains an invalid file size")
+            total_size += info.file_size
+            if total_size > MAX_EXTRACTED_BYTES:
+                raise ValueError("archive expands beyond the permitted size")
+            file_paths.add(path)
+        members.append((info, path, directory))
+
+    file_keys = {path.casefold() for path in file_paths}
+    for path in file_paths:
+        parts = path.split("/")
+        for index in range(1, len(parts)):
+            parent = "/".join(parts[:index])
+            if parent.casefold() in file_keys:
+                raise ValueError(f"archive contains conflicting file paths: {path}")
+
+    return members, total_size
+
+
+def _extract_archive(
+    archive: zipfile.ZipFile,
+    members: list[tuple[zipfile.ZipInfo, str, bool]],
+    destination: Path,
+) -> None:
+    """Extract validated members without trusting ZIP extraction helpers."""
+
+    for info, path, directory in members:
+        output = destination.joinpath(*path.split("/"))
+        if directory:
+            output.mkdir(parents=True, exist_ok=True)
+            continue
+        output.parent.mkdir(parents=True, exist_ok=True)
+        if output.exists() or output.is_symlink():
+            raise ValueError(f"archive contains conflicting file paths: {path}")
+        try:
+            with archive.open(info, "r") as source, output.open("xb") as target:
+                shutil.copyfileobj(source, target, length=1024 * 1024)
+        except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
+            raise ValueError("archive could not be extracted safely") from exc
+
+
+def _upload_target(bundle: Path) -> Path:
+    """Choose the scan target, unwrapping the common single-root ZIP layout."""
+
+    children = [child for child in bundle.iterdir() if child.name != "metadata.json"]
+    if len(children) == 1 and children[0].is_dir() and not children[0].is_symlink():
+        return children[0]
+    return bundle
+
+
+def _managed_upload_targets() -> list[str]:
+    """List previously uploaded targets using the same relative-path contract."""
+
+    root = UPLOADS_DIR.resolve()
+    workspace = PROJECT_ROOT.resolve()
+    if not root.is_dir():
+        return []
+    output: list[str] = []
+    for bundle in sorted(root.iterdir(), key=lambda item: item.name):
+        if not bundle.is_dir() or bundle.name.startswith("."):
+            continue
+        try:
+            output.append(_upload_target(bundle).resolve().relative_to(workspace).as_posix())
+        except (OSError, ValueError):
+            continue
+    return output
+
+
+@app.post("/api/v1/upload", response_model=UploadResponse)
+def upload_zip(file: UploadFile = File(...)) -> UploadResponse:
+    """Safely extract a ZIP upload into a unique, workspace-relative target."""
+
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="uploaded file must have a filename")
+    try:
+        file.file.seek(0, 2)
+        upload_size = file.file.tell()
+        file.file.seek(0)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="uploaded file could not be read") from exc
+    if upload_size > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="uploaded file is too large")
+
+    staging: Path | None = None
+    bundle: Path | None = None
+    committed = False
+    try:
+        try:
+            archive = zipfile.ZipFile(file.file)
+        except (OSError, zipfile.BadZipFile, zipfile.LargeZipFile) as exc:
+            raise HTTPException(status_code=400, detail="uploaded file must be a valid ZIP archive") from exc
+        with archive:
+            try:
+                members, total_size = _validate_archive(archive)
+                root = _upload_root()
+                staging = Path(tempfile.mkdtemp(prefix=".upload-", dir=root))
+                _extract_archive(archive, members, staging)
+            except HTTPException:
+                raise
+            except (OSError, ValueError, RuntimeError) as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        upload_id = uuid.uuid4().hex
+        bundle = root / f"upload-{upload_id}"
+        # Create the final directory without replacement, then move only into
+        # that newly-created empty directory.  This keeps an ID collision or a
+        # pre-existing target from ever being overwritten.
+        bundle.mkdir()
+        for child in staging.iterdir():
+            child.rename(bundle / child.name)
+        staging.rmdir()
+        staging = None
+        committed = True
+        target_path = _upload_target(bundle).resolve()
+        workspace = PROJECT_ROOT.resolve()
+        target_path.relative_to(workspace)
+        target = target_path.relative_to(workspace).as_posix()
+        return UploadResponse(
+            target=target,
+            path=target,
+            upload_id=upload_id,
+            filename=Path(file.filename).name,
+            content_type=file.content_type,
+            file_count=sum(not directory for _, _, directory in members),
+            directory_count=sum(directory for _, _, directory in members),
+            total_size_bytes=total_size,
+        )
+    except HTTPException:
+        raise
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="upload could not be stored safely") from exc
+    finally:
+        if staging is not None:
+            shutil.rmtree(staging, ignore_errors=True)
+        if bundle is not None and not committed:
+            shutil.rmtree(bundle, ignore_errors=True)
+
 
 def _looks_like_repository(directory: Path) -> bool:
     """Return whether a workspace directory looks like a project target."""

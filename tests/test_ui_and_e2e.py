@@ -81,6 +81,12 @@ def test_dashboard_assets_are_ascii_offline_and_svg_driven() -> None:
     assert "<svg" in index or "<svg" in icons
     assert "stroke-width=\"1.75\"" in icons
     assert "/api/v1/audit" in app_source
+    assert "/api/v1/upload" in app_source
+    assert 'id="zip-upload-input"' in index
+    assert 'id="zip-dropzone"' in index
+    assert "dragover" in app_source
+    assert "FormData" in app_source
+    assert "zip-dropzone" in (STATIC_ROOT / "styles.css").read_text(encoding="utf-8")
     assert app_source.count("document.body.appendChild(link);") >= 2
     assert app_source.count("setTimeout(function () {") >= 2
     assert app_source.count("URL.revokeObjectURL(url);") >= 2

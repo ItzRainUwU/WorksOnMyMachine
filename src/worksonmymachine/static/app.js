@@ -941,6 +941,69 @@
     runAudit(false, false);
   }
 
+  function setZipUploadStatus(message, tone) {
+    var status = byId("zip-upload-status");
+    if (!status) return;
+    status.textContent = message || "";
+    status.className = "zip-upload-status" + (tone ? " is-" + tone : "");
+  }
+
+  async function uploadZip(file) {
+    if (!file) return;
+    var dropzone = byId("zip-dropzone");
+    var input = byId("zip-upload-input");
+    var name = String(file.name || "");
+    if (!/\.zip$/i.test(name)) {
+      setZipUploadStatus("Choose a .zip archive.", "error");
+      return;
+    }
+    if (dropzone) {
+      dropzone.classList.add("is-uploading");
+      dropzone.setAttribute("aria-busy", "true");
+    }
+    setZipUploadStatus("Uploading and validating " + name + "...", "loading");
+    try {
+      var form = new FormData();
+      form.append("file", file, name);
+      var response = await fetch("/api/v1/upload", {
+        method: "POST",
+        headers: { Accept: "application/json" },
+        body: form,
+      });
+      var payload = null;
+      try { payload = await response.json(); } catch (error) { payload = null; }
+      if (!response.ok) {
+        throw new Error(payload && (payload.detail || payload.message) || "Upload failed with status " + response.status);
+      }
+      await loadTargets();
+      state.target = payload.target;
+      state.report = null;
+      state.analysis = null;
+      state.comparison = null;
+      state.buildVerification = null;
+      state.auditWasAutoHealed = false;
+      state.selectedHealedFilePath = null;
+      var select = byId("target-select");
+      if (select) select.value = state.target;
+      renderTargetDescription();
+      renderAll();
+      setTargetPopover(false);
+      logEvent("uploaded " + name + " as " + state.target, "success");
+      setZipUploadStatus("Upload complete. Starting audit...", "success");
+      await runAudit(false, false);
+    } catch (error) {
+      logEvent("ZIP upload failed: " + error.message, "error");
+      setZipUploadStatus(error.message || "ZIP upload failed.", "error");
+      showToast(error.message || "ZIP upload failed.", true);
+    } finally {
+      if (input) input.value = "";
+      if (dropzone) {
+        dropzone.classList.remove("is-uploading");
+        dropzone.setAttribute("aria-busy", "false");
+      }
+    }
+  }
+
   function selectView(view) {
     var requested = view || "dashboard";
     var knownViews = ["dashboard", "bugs", "dependency", "sandbox", "build", "security", "reports", "settings"];
@@ -1245,6 +1308,34 @@
       setTargetPopover(!popover || !popover.classList.contains("is-open"));
     });
     on("use-target-button", "click", useWorkspaceTarget);
+    on("zip-upload-input", "change", function (event) {
+      uploadZip(event.target.files && event.target.files[0]);
+    });
+    on("zip-dropzone", "keydown", function (event) {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        var input = byId("zip-upload-input");
+        if (input) input.click();
+      }
+    });
+    on("zip-dropzone", "dragenter", function (event) {
+      event.preventDefault();
+      event.currentTarget.classList.add("is-dragging");
+    });
+    on("zip-dropzone", "dragover", function (event) {
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "copy";
+      event.currentTarget.classList.add("is-dragging");
+    });
+    on("zip-dropzone", "dragleave", function (event) {
+      if (event.currentTarget.contains(event.relatedTarget)) return;
+      event.currentTarget.classList.remove("is-dragging");
+    });
+    on("zip-dropzone", "drop", function (event) {
+      event.preventDefault();
+      event.currentTarget.classList.remove("is-dragging");
+      uploadZip(event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files[0]);
+    });
     on("target-path-input", "keydown", function (event) {
       if (event.key === "Enter") useWorkspaceTarget();
       if (event.key === "Escape") setTargetPopover(false);

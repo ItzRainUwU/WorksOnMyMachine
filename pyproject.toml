@@ -11,6 +11,7 @@ dependencies = [
     "fastapi==0.115.0",
     "uvicorn==0.30.6",
     "pydantic==2.9.2",
+    "python-multipart==0.0.22",
     "rich==13.8.1",
     "click==8.1.7",
 ]

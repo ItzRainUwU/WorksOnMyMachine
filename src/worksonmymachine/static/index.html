@@ -49,6 +49,13 @@
             <label for="target-path-input">WORKSPACE-RELATIVE TARGET</label>
             <div class="target-path-row"><input id="target-path-input" type="text" autocomplete="off" spellcheck="false" placeholder="workspace or projects/api-service"><button class="button button-primary button-small" id="use-target-button" type="button">Use target</button></div>
             <p>Only normalized paths inside this workspace are accepted. Use <code>workspace</code> for the current repository.</p>
+            <div class="upload-divider"><span>OR</span></div>
+            <input class="sr-only" id="zip-upload-input" type="file" accept=".zip,application/zip,application/x-zip-compressed">
+            <label class="zip-dropzone" id="zip-dropzone" for="zip-upload-input" tabindex="0" aria-label="Upload a ZIP project">
+              <span class="zip-dropzone-icon"><span class="icon-slot" data-icon="downloadCert" data-size="20"></span></span>
+              <span class="zip-dropzone-copy"><strong>Drop a project ZIP here</strong><small>or click to browse - ZIP only</small></span>
+            </label>
+            <div class="zip-upload-status" id="zip-upload-status" role="status" aria-live="polite"></div>
           </div>
           <div class="system-status" id="connection-status"><span class="status-dot" id="connection-dot"></span><span id="connection-label">All Systems Operational</span></div>
           <div class="header-actions">

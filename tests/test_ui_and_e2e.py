@@ -84,6 +84,8 @@ def test_dashboard_assets_are_ascii_offline_and_svg_driven() -> None:
     assert "await runAudit(false, true);" in app_source
     assert "await runAudit(true, true);" not in app_source
     assert "report.after_certificate, report.certificate, report.before_certificate, report" in app_source
+    assert "var auditTarget = state.target;" in app_source
+    assert "if (state.target !== auditTarget) runAudit(false, false);" in app_source
     assert "/api/v1/upload" in app_source
     assert 'id="zip-upload-input"' in index
     assert 'id="zip-dropzone"' in index

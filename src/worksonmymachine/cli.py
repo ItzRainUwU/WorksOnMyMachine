@@ -932,3 +932,7 @@ def heal(target: str | None, workspace_root: Path | None, as_json: bool) -> None
 
 
 __all__ = ["main"]
+
+
+if __name__ == "__main__":
+    main()

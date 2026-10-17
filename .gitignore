@@ -23,3 +23,14 @@ audit.md
 baseline-audit.json
 new-findings.json
 certificate.json
+
+# Local runtime state and workspace-only metadata.
+.worksonmymachine/
+.worksonmymachine-baseline.json
+
+# Editor and operating-system metadata.
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log

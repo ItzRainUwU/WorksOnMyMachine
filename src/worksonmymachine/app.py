@@ -745,6 +745,8 @@ def _redact_sensitive_text(value: object, limit: int = MAX_EXPLANATION_TEXT) -> 
 def _redact_build_output(value: str, limit: int = 12000) -> str:
     """Keep build receipts useful without persisting common secret values."""
 
+    if limit <= 0:
+        return ""
     redacted = redact_sensitive_text(value or "")
     return redacted[-limit:]
 
@@ -823,6 +825,19 @@ def verify_build(request: BuildVerificationRequest) -> BuildVerification:
             started_at=started_at,
             command=display_command,
             detail="Docker is not installed or is not available on PATH.",
+            auto_heal=request.auto_heal,
+        )
+    if configured_build and not settings.allow_configured_build_commands:
+        return _verification_response(
+            verification_id=verification_id,
+            target=request.target,
+            status="blocked",
+            started_at=started_at,
+            command=display_command,
+            detail=(
+                "Configured build commands are disabled for API requests. "
+                "Set ALLOW_CONFIGURED_BUILD_COMMANDS=true only in a trusted local environment."
+            ),
             auto_heal=request.auto_heal,
         )
 

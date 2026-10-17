@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import importlib
+from dataclasses import replace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -190,6 +191,31 @@ def test_staged_build_reports_blocked_without_docker(monkeypatch) -> None:
     assert "Docker" in body["detail"]
 
 
+def test_staged_build_blocks_configured_commands_without_explicit_opt_in(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        APP_MODULE,
+        "workspace_config",
+        replace(APP_MODULE.workspace_config, build_command="echo unsafe"),
+    )
+    monkeypatch.setattr(
+        APP_MODULE,
+        "settings",
+        replace(APP_MODULE.settings, allow_configured_build_commands=False),
+    )
+
+    response = TestClient(app).post(
+        "/api/v1/verify-build",
+        json={"target": "demo_targets/nightmare_ml_service", "auto_heal": True},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "blocked"
+    assert "disabled" in body["detail"]
+
+
 def test_staged_build_output_redacts_common_secret_formats() -> None:
     from worksonmymachine.app import _redact_build_output
 
@@ -210,6 +236,7 @@ def test_staged_build_output_redacts_common_secret_formats() -> None:
         assert secret not in redacted
     assert "API_KEY=[REDACTED]" in redacted
     assert "[REDACTED PRIVATE KEY]" in redacted
+    assert _redact_build_output(output, limit=0) == ""
 
 
 def test_workspace_config_loads_safe_defaults() -> None:

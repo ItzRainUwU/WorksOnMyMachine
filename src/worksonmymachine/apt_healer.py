@@ -73,6 +73,7 @@ _KNOWN_PROVIDER_TOKEN = re.compile(
     r"|\bnpm_[A-Za-z0-9]{30,}\b"
     r"|\b(?:hf|r8|vercel)_[A-Za-z0-9_]{20,}\b"
     r"|\bSG\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\b"
+    r"|\b(?:glpat-|dckr_pat_|dop_v1_|pypi-|sbp_|lin_api_)[A-Za-z0-9_-]{20,}\b"
     r"|\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"
 )
 _REDACTED_PRIVATE_KEY = "[REDACTED PRIVATE KEY]"
@@ -86,13 +87,18 @@ def redact_sensitive_text(value: object, limit: int | None = None) -> str:
     """Redact common credentials while retaining bounded diagnostic context."""
 
     text = str(value or "")
+    if limit is not None and limit <= 0:
+        return ""
     text = _PEM_PRIVATE_KEY.sub(_REDACTED_PRIVATE_KEY, text)
     text = _SECRET_ASSIGNMENT.sub(r"\1" + _REDACTED_SECRET, text)
     text = _BEARER_TOKEN.sub(r"\1" + _REDACTED_SECRET, text)
     text = _KNOWN_PROVIDER_TOKEN.sub(_REDACTED_SECRET, text)
     if limit is not None and len(text) > limit:
         marker = _TRUNCATION_MARKER
-        text = text[: max(0, limit - len(marker))] + marker
+        available = max(0, limit - len(marker))
+        head = (available + 1) // 2
+        tail = available - head
+        text = text[:head] + marker + (text[-tail:] if tail else "")
     return text
 # ``apt_packages`` is retained as the stable, Debian-oriented vocabulary used
 # by the parser and existing API clients.  Dockerfile healing translates that
@@ -650,7 +656,7 @@ def parse_compiler_log(log_text: str) -> list[CompilerDiagnostic]:
                 line_number=line_number,
                 code=rule.signature,
                 raw_output=safe_text,
-                error_signature=message,
+                error_signature=_redact_sensitive_output(message),
                 missing_artifact=rule.artifact,
                 recommended_apt_packages=list(rule.packages),
                 root_cause_explanation=rule.explanation,

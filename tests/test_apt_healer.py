@@ -48,25 +48,51 @@ def test_compiler_diagnostics_redact_secrets_from_raw_output_and_signature() -> 
     assignment = "assignment-secret-123"
     bearer = "bearer-secret-456"
     provider = "sk-proj-provider-secret-abcdefghijklmnopqrstuvwxyz"
+    provider_tokens = (
+        "glpat-provider-secret-abcdefghijklmnopqrstuvwxyz",
+        "dckr_pat_provider-secret-abcdefghijklmnopqrstuvwxyz",
+        "dop_v1_provider-secret-abcdefghijklmnopqrstuvwxyz",
+    )
     aws = "AKIAIOSFODNN7EXAMPLE"
     jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyIn0.signature-secret"
     pem = "-----BEGIN RSA PRIVATE KEY-----\\nprivate-key-material\\n-----END RSA PRIVATE KEY-----"
     log_text = (
         "fatal error: Python.h: No such file or directory "
         f"API_KEY={assignment} Authorization: Bearer {bearer} "
-        f"OPENAI_API_KEY={provider} AWS_ACCESS_KEY_ID={aws} JWT={jwt}\n"
+        f"OPENAI_API_KEY={provider} AWS_ACCESS_KEY_ID={aws} JWT={jwt} "
+        + " ".join(provider_tokens)
+        + "\n"
         + pem
     )
 
     diagnostic = _diagnostic_for(parse_compiler_log(log_text), "Python.h")
 
-    for secret in (assignment, bearer, provider, aws, jwt, "private-key-material"):
+    for secret in (
+        assignment,
+        bearer,
+        provider,
+        aws,
+        jwt,
+        *provider_tokens,
+        "private-key-material",
+    ):
         assert secret not in diagnostic.raw_output
         assert secret not in diagnostic.error_signature
     assert "Python.h" in diagnostic.error_signature
     assert "[REDACTED]" in diagnostic.raw_output
     assert "[REDACTED PRIVATE KEY]" in diagnostic.raw_output
     assert len(diagnostic.raw_output) <= 12_000
+
+
+def test_compiler_diagnostic_raw_output_keeps_a_bounded_useful_window() -> None:
+    log_text = "noise\n" * 5_000 + "fatal error: Python.h: No such file or directory\n"
+
+    diagnostic = _diagnostic_for(parse_compiler_log(log_text), "Python.h")
+
+    assert len(diagnostic.raw_output) == 12_000
+    assert "...[truncated]" in diagnostic.raw_output
+    assert "Python.h" in diagnostic.raw_output
+    assert "Python.h" in diagnostic.error_signature
 
 
 def test_rust_log_parser_recommends_native_and_rust_toolchain_packages() -> None:

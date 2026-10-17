@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 from typing import Iterable
 
-from .config import SuppressionRule, WorkspaceConfig
+from .config import Policy, SuppressionRule, WorkspaceConfig
 from .models import AuditReport, LandmineIssue
 
 
@@ -220,9 +220,25 @@ def ci_exit_code(
     issues: Iterable[LandmineIssue],
     fail_on: str | None = None,
     min_readiness: float | None = None,
-    require_reproducible: bool = False,
+    require_reproducible: bool | None = None,
+    *,
+    allow_floating_docker_tags: bool | None = None,
+    require_lockfiles: bool | None = None,
+    policy: Policy | None = None,
 ) -> int:
     """Return stable CI exit codes: 0 clean, 1 policy failure, 2 certificate failure."""
+
+    if policy is not None:
+        if fail_on is None:
+            fail_on = policy.fail_on
+        if min_readiness is None:
+            min_readiness = policy.min_readiness
+        if require_reproducible is None:
+            require_reproducible = policy.require_reproducible
+        if allow_floating_docker_tags is None:
+            allow_floating_docker_tags = policy.allow_floating_docker_tags
+        if require_lockfiles is None:
+            require_lockfiles = policy.require_lockfiles
 
     rank = {"low": 1, "medium": 2, "high": 3, "critical": 4}
     if fail_on and any(rank.get(issue.severity.value, 0) >= rank[fail_on] for issue in issues):
@@ -233,4 +249,44 @@ def ci_exit_code(
         return 1
     if require_reproducible and (not certificate or not certificate.is_cleanroom_certified):
         return 2
+    if certificate is not None:
+        if require_lockfiles and not _has_lockfile_evidence(certificate):
+            return 1
+        if allow_floating_docker_tags is False and _has_floating_docker_tags(certificate):
+            return 1
     return 0
+
+
+def _has_lockfile_evidence(certificate: object) -> bool:
+    """Return whether certificate file evidence contains a dependency lock.
+
+    Certificates expose the hashed file list, so this check does not inspect the
+    target again or infer lockfile presence from a readiness score.  Older,
+    hand-built certificates without file nodes retain the dependency hash as a
+    conservative compatibility signal.
+    """
+
+    nodes = getattr(certificate, "file_nodes", ())
+    if nodes:
+        lock_names = {
+            "requirements.lock",
+            "poetry.lock",
+            "uv.lock",
+            "pipfile.lock",
+            "cargo.lock",
+            "package-lock.json",
+            "yarn.lock",
+            "pnpm-lock.yaml",
+        }
+        return any(Path(node.path).name.lower() in lock_names for node in nodes)
+    return bool(getattr(certificate, "dependency_lock_hash", None))
+
+
+def _has_floating_docker_tags(certificate: object) -> bool:
+    """Use certificate Docker evidence to conservatively detect floating tags."""
+
+    nodes = getattr(certificate, "file_nodes", ())
+    has_dockerfile = any(
+        Path(node.path).name.lower().startswith("dockerfile") for node in nodes
+    )
+    return has_dockerfile and not bool(getattr(certificate, "dockerfile_hardened", False))

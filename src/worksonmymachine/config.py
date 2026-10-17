@@ -91,6 +91,7 @@ class WorkspaceConfig:
     baseline_file: str = ".worksonmymachine-baseline.json"
     suppressions: tuple["SuppressionRule", ...] = ()
     policy: Policy = field(default_factory=Policy)
+    policy_configured: bool = False
     profile: str = "generic"
 
     def __post_init__(self) -> None:
@@ -106,6 +107,8 @@ class WorkspaceConfig:
         # profile selection. Explicit non-default policy values remain intact.
         if self.policy == Policy() and selected.policy != Policy():
             object.__setattr__(self, "policy", selected.policy)
+        if selected.name != "generic" and not self.policy_configured:
+            object.__setattr__(self, "policy_configured", True)
 
     @property
     def repository_profile(self) -> "RepositoryProfile":
@@ -141,6 +144,7 @@ class Settings:
     app_port: int = 8000
     log_level: str = "INFO"
     strict_repro_mode: bool = True
+    allow_configured_build_commands: bool = False
     sandbox_dir: Path = DEFAULT_SANDBOX_DIR
     workspace_config_path: Path = DEFAULT_WORKSPACE_CONFIG
 
@@ -184,9 +188,13 @@ def _relative_sandbox(value: str) -> Path:
 
 
 def _as_bool(value: str) -> bool:
+    return _as_named_bool(value, "STRICT_REPRO_MODE")
+
+
+def _as_named_bool(value: str, name: str) -> bool:
     normalized = value.strip().lower()
     if normalized not in {"true", "false"}:
-        raise ValueError("STRICT_REPRO_MODE must be true or false")
+        raise ValueError(f"{name} must be true or false")
     return normalized == "true"
 
 
@@ -306,6 +314,7 @@ def load_workspace_config(path: Path | None = None) -> WorkspaceConfig:
         ),
         suppressions=_load_suppressions(parsed.get("suppressions")),
         policy=policy_from_mapping(parsed.get("policy"), defaults=selected_profile.policy),
+        policy_configured=("policy" in parsed or selected_profile.name != "generic"),
         profile=selected_profile.name,
     )
 
@@ -349,6 +358,10 @@ def load_settings(
         app_port=app_port,
         log_level=log_level,
         strict_repro_mode=_as_bool(value("STRICT_REPRO_MODE", "true")),
+        allow_configured_build_commands=_as_named_bool(
+            value("ALLOW_CONFIGURED_BUILD_COMMANDS", "false"),
+            "ALLOW_CONFIGURED_BUILD_COMMANDS",
+        ),
         sandbox_dir=_relative_sandbox(value("SANDBOX_DIR", "demo_targets")),
         workspace_config_path=_relative_sandbox(value("WORKSPACE_CONFIG", ".worksonmymachine.toml")),
     )

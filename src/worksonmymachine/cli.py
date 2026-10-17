@@ -11,7 +11,13 @@ from rich.console import Console
 from rich.table import Table
 
 from .apt_healer import analyze_log_hybrid
-from .config import PROJECT_ROOT, workspace_config
+from .config import (
+    PROJECT_ROOT,
+    Policy,
+    WorkspaceConfig,
+    load_workspace_config,
+    workspace_config,
+)
 from .exports import (
     ci_exit_code,
     filter_issues,
@@ -223,9 +229,11 @@ def _apt_install_command(packages: list[str]) -> str:
 
 
 def _baseline_path(
-    value: str | None, workspace_root: str | Path | None = None
+    value: str | None,
+    workspace_root: str | Path | None = None,
+    config: WorkspaceConfig | None = None,
 ) -> Path:
-    path = Path(value or workspace_config.baseline_file)
+    path = Path(value or (config or workspace_config).baseline_file)
     return path if path.is_absolute() else _resolve_workspace_root(workspace_root) / path
 
 
@@ -235,6 +243,50 @@ def _default_target(workspace_root: str | Path | None) -> str:
     if workspace_root is not None:
         return "workspace"
     return workspace_config.target_paths[0]
+
+
+def _workspace_config_for(workspace_root: str | Path | None) -> WorkspaceConfig:
+    """Load policy from an explicitly selected caller workspace."""
+
+    if workspace_root is None:
+        return workspace_config
+    root = _resolve_workspace_root(workspace_root)
+    return load_workspace_config(root / ".worksonmymachine.toml")
+
+
+def _effective_policy_values(
+    config: WorkspaceConfig,
+    *,
+    fail_on: str | None,
+    min_readiness: float | None,
+    require_reproducible: bool | None,
+    allow_floating_docker_tags: bool | None,
+    require_lockfiles: bool | None,
+) -> tuple[str | None, float | None, bool, bool | None, bool | None]:
+    """Merge explicit CLI values over an active workspace policy.
+
+    A missing policy table intentionally leaves the historical CLI defaults in
+    place.  ``policy_configured`` also lets a policy table containing only
+    default values remain distinguishable from no policy at all.
+    """
+
+    active = config.policy_configured or config.policy != Policy()
+    policy = config.policy if active else None
+    return (
+        fail_on if fail_on is not None else (policy.fail_on if policy else None),
+        min_readiness
+        if min_readiness is not None
+        else (policy.min_readiness if policy else None),
+        require_reproducible
+        if require_reproducible is not None
+        else (policy.require_reproducible if policy else False),
+        allow_floating_docker_tags
+        if allow_floating_docker_tags is not None
+        else (policy.allow_floating_docker_tags if policy else None),
+        require_lockfiles
+        if require_lockfiles is not None
+        else (policy.require_lockfiles if policy else None),
+    )
 
 
 def _confirm_apply(yes: bool) -> None:
@@ -291,19 +343,36 @@ def _run_audit_command(
     new_only: bool,
     baseline: str | None,
     write_baseline_file: bool,
-    require_reproducible: bool,
+    require_reproducible: bool | None,
     workspace_root: str | Path | None = None,
     apply: bool = False,
     yes: bool = False,
     signing_key: str | bytes | None = None,
     signing_key_file: str | Path | None = None,
     signature_key_id: str = "local",
+    allow_floating_docker_tags: bool | None = None,
+    require_lockfiles: bool | None = None,
 ) -> None:
     if apply and not auto_heal:
         raise click.UsageError("--auto-heal is required when using --apply")
     if yes and not apply:
         raise click.UsageError("--yes is only valid together with --apply")
 
+    config = _workspace_config_for(workspace_root)
+    (
+        fail_on,
+        min_readiness,
+        require_reproducible,
+        allow_floating_docker_tags,
+        require_lockfiles,
+    ) = _effective_policy_values(
+        config,
+        fail_on=fail_on,
+        min_readiness=min_readiness,
+        require_reproducible=require_reproducible,
+        allow_floating_docker_tags=allow_floating_docker_tags,
+        require_lockfiles=require_lockfiles,
+    )
     target_path = _resolve_target(target, workspace_root)
     key = _load_signing_key(signing_key, signing_key_file)
     report = run_full_audit(
@@ -329,9 +398,9 @@ def _run_audit_command(
                 "unified_diff_count": len(applied_result.unified_diffs),
             }
         )
-    baseline_file = _baseline_path(baseline, workspace_root)
+    baseline_file = _baseline_path(baseline, workspace_root, config)
     baseline_values = load_baseline(baseline_file) if new_only else set()
-    effective, suppressed = filter_issues(report.issues, workspace_config, baseline_values, new_only)
+    effective, suppressed = filter_issues(report.issues, config, baseline_values, new_only)
     if write_baseline_file:
         write_baseline(baseline_file, target, report.issues)
         click.echo(f"Wrote baseline {baseline_file}", err=True)
@@ -361,12 +430,28 @@ def _run_audit_command(
             console.print(
                 f"Applied healing changes: {applied_result.issues_fixed} issue(s) fixed"
             )
-        code = ci_exit_code(report, effective, fail_on, min_readiness, require_reproducible)
+        code = ci_exit_code(
+            report,
+            effective,
+            fail_on,
+            min_readiness,
+            require_reproducible,
+            allow_floating_docker_tags=allow_floating_docker_tags,
+            require_lockfiles=require_lockfiles,
+        )
         if code:
             raise click.exceptions.Exit(code)
         return
     _write_or_echo(payload, output)
-    code = ci_exit_code(report, effective, fail_on, min_readiness, require_reproducible)
+    code = ci_exit_code(
+        report,
+        effective,
+        fail_on,
+        min_readiness,
+        require_reproducible,
+        allow_floating_docker_tags=allow_floating_docker_tags,
+        require_lockfiles=require_lockfiles,
+    )
     if code:
         raise click.exceptions.Exit(code)
 
@@ -403,7 +488,21 @@ def main() -> None:
 @click.option("--new-only", is_flag=True, help="Exclude findings already present in the baseline.")
 @click.option("--baseline", type=click.Path(dir_okay=False), help="Baseline JSON path.")
 @click.option("--write-baseline", is_flag=True, help="Write the current raw findings as the baseline.")
-@click.option("--require-reproducible", is_flag=True, help="Fail when the CleanRoom certificate is not reproducible.")
+@click.option(
+    "--require-reproducible/--no-require-reproducible",
+    default=None,
+    help="Require (or do not require) a reproducible CleanRoom certificate.",
+)
+@click.option(
+    "--allow-floating-docker-tags/--disallow-floating-docker-tags",
+    default=None,
+    help="Allow (or reject) floating Docker base-image tags.",
+)
+@click.option(
+    "--require-lockfiles/--no-require-lockfiles",
+    default=None,
+    help="Require (or do not require) a dependency lockfile.",
+)
 @click.option("--signing-key", help="Explicit HMAC signing key; omitted by default.",)
 @click.option("--signing-key-file", type=click.Path(dir_okay=False), help="Read the explicit signing key from a file.")
 @click.option("--signature-key-id", default="local", show_default=True, help="Public identifier stored with a signature.")
@@ -420,7 +519,9 @@ def audit_command(
     new_only: bool,
     baseline: str | None,
     write_baseline: bool,
-    require_reproducible: bool,
+    require_reproducible: bool | None,
+    allow_floating_docker_tags: bool | None,
+    require_lockfiles: bool | None,
     signing_key: str | None,
     signing_key_file: str | None,
     signature_key_id: str,
@@ -444,6 +545,8 @@ def audit_command(
         signing_key,
         signing_key_file,
         signature_key_id,
+        allow_floating_docker_tags,
+        require_lockfiles,
     )
 
 
@@ -464,7 +567,18 @@ def audit_command(
 @click.option("--new-only", is_flag=True)
 @click.option("--baseline", type=click.Path(dir_okay=False))
 @click.option("--write-baseline", is_flag=True)
-@click.option("--require-reproducible", is_flag=True)
+@click.option(
+    "--require-reproducible/--no-require-reproducible",
+    default=None,
+)
+@click.option(
+    "--allow-floating-docker-tags/--disallow-floating-docker-tags",
+    default=None,
+)
+@click.option(
+    "--require-lockfiles/--no-require-lockfiles",
+    default=None,
+)
 @click.option("--signing-key", help="Explicit HMAC signing key; omitted by default.")
 @click.option("--signing-key-file", type=click.Path(dir_okay=False), help="Read the explicit signing key from a file.")
 @click.option("--signature-key-id", default="local", show_default=True, help="Public identifier stored with a signature.")
@@ -479,7 +593,9 @@ def check_command(
     new_only: bool,
     baseline: str | None,
     write_baseline: bool,
-    require_reproducible: bool,
+    require_reproducible: bool | None,
+    allow_floating_docker_tags: bool | None,
+    require_lockfiles: bool | None,
     signing_key: str | None,
     signing_key_file: str | None,
     signature_key_id: str,
@@ -503,6 +619,8 @@ def check_command(
         signing_key,
         signing_key_file,
         signature_key_id,
+        allow_floating_docker_tags,
+        require_lockfiles,
     )
 
 

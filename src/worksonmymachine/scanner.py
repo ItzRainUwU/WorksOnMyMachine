@@ -435,6 +435,13 @@ def _ensure_safe_parent_components(root: Path, path: Path) -> None:
             ) from exc
 
 
+_ALLOWED_SYSTEM_SYMLINKS = (
+    frozenset({Path("/var"), Path("/tmp"), Path("/etc")})
+    if os.name != "nt"
+    else frozenset()
+)
+
+
 def _ensure_no_link_components(path: Path) -> None:
     """Reject an output path whose existing parent traverses a link."""
 
@@ -442,6 +449,8 @@ def _ensure_no_link_components(path: Path) -> None:
     current = Path(absolute.anchor)
     for part in absolute.parts[1:]:
         current /= part
+        if current in _ALLOWED_SYSTEM_SYMLINKS:
+            continue
         if _is_link_like(current):
             raise HealingConflictError(
                 f"path traverses a link or reparse point: {path}"
@@ -2357,7 +2366,7 @@ def apply_healing(target_path: Path) -> HealResult:
     if not target.is_dir():
         raise ValueError("target_path must be a directory")
     expected_snapshot = _snapshot_tree(target)
-    staging_parent = Path(tempfile.mkdtemp(prefix="worksonmymachine-apply-"))
+    staging_parent = Path(tempfile.mkdtemp(prefix="worksonmymachine-apply-")).resolve()
     staged = staging_parent / "target"
     try:
         result = heal_repository(target, staged)
@@ -2410,7 +2419,7 @@ def heal_repository(target_path: Path, output_path: Path | None = None) -> HealR
     output = (
         Path(output_path)
         if output_path is not None
-        else Path(tempfile.mkdtemp(prefix="worksonmymachine-healed-"))
+        else Path(tempfile.mkdtemp(prefix="worksonmymachine-healed-")).resolve()
     )
     try:
         _ensure_no_link_components(output.parent)
@@ -2478,7 +2487,7 @@ def heal_repository(target_path: Path, output_path: Path | None = None) -> HealR
         None,
     )
     if dockerfile is not None:
-        docker_stage = Path(tempfile.mkdtemp(prefix="worksonmymachine-docker-stage-"))
+        docker_stage = Path(tempfile.mkdtemp(prefix="worksonmymachine-docker-stage-")).resolve()
         try:
             docker_result = heal_dockerfile(output, docker_stage)
             docker_before = docker_result.before_content

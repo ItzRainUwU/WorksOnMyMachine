@@ -548,7 +548,7 @@ def heal(request: TargetRequest) -> HealResult:
         # HTTP healing is a one-shot operation. Keep its staging directory
         # private to the request and remove it before returning; the result
         # still records the cleaned staging location for a complete response.
-        staging = Path(tempfile.mkdtemp(prefix="worksonmymachine-api-healed-"))
+        staging = Path(tempfile.mkdtemp(prefix="worksonmymachine-api-healed-")).resolve()
         try:
             result = heal_repository(target_path, staging)
         finally:
@@ -626,7 +626,7 @@ def heal_dockerfile_endpoint(request: DockerfileHealRequest) -> DockerfilePatchR
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    input_path = Path(tempfile.mkdtemp(prefix="worksonmymachine-api-docker-input-"))
+    input_path = Path(tempfile.mkdtemp(prefix="worksonmymachine-api-docker-input-")).resolve()
     try:
         (input_path / "Dockerfile.broken").write_text(
             request.dockerfile_content or "",
@@ -841,7 +841,7 @@ def verify_build(request: BuildVerificationRequest) -> BuildVerification:
             auto_heal=request.auto_heal,
         )
 
-    staging = Path(tempfile.mkdtemp(prefix="worksonmymachine-build-"))
+    staging = Path(tempfile.mkdtemp(prefix="worksonmymachine-build-")).resolve()
     tag = "worksonmymachine-verify:" + verification_id[:12]
     actual_command = [
         "docker",

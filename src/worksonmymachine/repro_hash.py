@@ -1404,7 +1404,7 @@ def run_full_audit(
     diffs: list[str] = []
     dependency_data = dependency_telemetry(target)
     if auto_heal:
-        staging_parent = Path(tempfile.mkdtemp(prefix="worksonmymachine-audit-"))
+        staging_parent = Path(tempfile.mkdtemp(prefix="worksonmymachine-audit-")).resolve()
         staged = staging_parent / "target"
         try:
             heal_result = heal_repository(target, staged)

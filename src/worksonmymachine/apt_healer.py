@@ -779,7 +779,7 @@ def _safe_output(target: Path, output_path: Path | None) -> Path:
     output = (
         Path(output_path)
         if output_path is not None
-        else Path(tempfile.mkdtemp(prefix="worksonmymachine-docker-healed-"))
+        else Path(tempfile.mkdtemp(prefix="worksonmymachine-docker-healed-")).resolve()
     )
     output_resolved = output.resolve()
     try:

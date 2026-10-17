@@ -511,9 +511,9 @@ pre,
 .dependency-graph svg {
   display: block;
   width: 100%;
-  min-width: 720px;
-  height: 100%;
-  min-height: 320px;
+  min-width: 960px;
+  height: auto;
+  min-height: 360px;
 }
 
 .graph-text-alternative {

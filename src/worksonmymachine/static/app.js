@@ -334,9 +334,17 @@
   }
 
   function readinessScore(report) {
-    var certificate = selectedCertificate(report);
     if (!report) return null;
-    if (Number.isFinite(Number(certificate.linux_readiness_score))) return Number(certificate.linux_readiness_score);
+    var sources = [report.after_certificate, report.certificate, report.before_certificate, report];
+    for (var index = 0; index < sources.length; index += 1) {
+      var source = sources[index];
+      if (!source) continue;
+      var raw = source.linux_readiness_score;
+      if (raw == null || raw === "") raw = source.readiness_score;
+      if (raw == null || raw === "") continue;
+      var value = Number(raw);
+      if (Number.isFinite(value)) return value;
+    }
     return Math.max(0, 100 - safeArray(report.issues).length * 8);
   }
 
@@ -887,19 +895,31 @@
       return;
     }
 
-    var target = { kind: "target", label: state.target, meta: "active workspace target", x: 40, y: 24 };
-    var certificateNode = { kind: "certificate", label: certificate.root_hash ? "CleanRoom certificate" : "Certificate pending", meta: certificate.root_hash || "audit proof", x: 280, y: 24 };
-    var graphFiles = fileNodes.slice(0, 14).map(function (node, index) {
-      return { kind: "file", label: node.path, meta: (node.has_crlf ? "file / CRLF / " : "file / ") + String(node.digest || "pending"), x: 540, y: 24 + index * 64 };
+    var target = { kind: "target", label: state.target, meta: "active workspace target", x: 40, y: 36 };
+    var certificateNode = { kind: "certificate", label: certificate.root_hash ? "CleanRoom certificate" : "Certificate pending", meta: certificate.root_hash || "audit proof", x: 290, y: 36 };
+    var allFiles = fileNodes.slice(0, 14);
+    manifests.filter(function (manifest) { return !allFiles.some(function (node) { return node.path === manifest; }); }).slice(0, 6).forEach(function (manifest) {
+      allFiles.push({ path: manifest, digest: "lock evidence", has_crlf: false });
     });
-    manifests.filter(function (manifest) { return !graphFiles.some(function (node) { return node.label === manifest; }); }).slice(0, 8).forEach(function (manifest, index) {
-      graphFiles.push({ kind: "file", label: manifest, meta: "manifest / lock evidence", x: 540, y: 24 + (fileNodes.length + index) * 64 });
+    var splitCols = allFiles.length > 7;
+    var graphFiles = allFiles.map(function (node, index) {
+      var col = splitCols ? (index % 2) : 0;
+      var row = splitCols ? Math.floor(index / 2) : index;
+      var xPos = col === 1 ? 810 : 550;
+      return {
+        kind: "file",
+        label: node.path,
+        meta: (node.has_crlf ? "file / CRLF / " : "file / ") + String(node.digest || "pending"),
+        x: xPos,
+        y: 36 + row * 64
+      };
     });
+    var rightColX = splitCols ? 1070 : 830;
     var packages = packageNames.map(function (name, index) {
-      return { kind: "package", label: name, meta: "apt package / parsed build evidence", x: 820, y: 24 + index * 64 };
+      return { kind: "package", label: name, meta: "apt package / parsed build evidence", x: rightColX, y: 36 + index * 64 };
     });
     var dockerNodes = dockerBases.map(function (base, index) {
-      return { kind: "docker", label: base, meta: "Docker base evidence", x: 820, y: 24 + (packageNames.length + index) * 64 };
+      return { kind: "docker", label: base, meta: "Docker base evidence", x: rightColX, y: 36 + (packageNames.length + index) * 64 };
     });
     var nodes = [target, certificateNode].concat(graphFiles, packages, dockerNodes);
     var relationships = [{ from: target, to: certificateNode }];
@@ -919,8 +939,9 @@
       if (dockerFile) dockerNodes.forEach(function (node) { connect(dockerFile, node); });
     }
     var maxY = Math.max.apply(null, nodes.map(function (node) { return node.y + 52; }));
-    var width = 1100;
-    panel.innerHTML = '<svg viewBox="0 0 ' + width + ' ' + Math.max(320, maxY + 24) + '" role="img" aria-labelledby="dependency-graph-svg-title" aria-describedby="dependency-graph-text-summary"><title id="dependency-graph-svg-title">Dependency evidence graph for ' + escapeHtml(state.target) + '</title><desc>Nodes show the active target, certificate, files, packages, and Docker base evidence. Connections show evidence relationships.</desc><g aria-hidden="true">' + edges.join("") + nodes.map(graphNodeMarkup).join("") + '</g></svg>';
+    var width = splitCols ? 1340 : 1120;
+    var totalHeight = Math.max(380, maxY + 36);
+    panel.innerHTML = '<svg viewBox="0 0 ' + width + ' ' + totalHeight + '" style="min-width:' + width + 'px; height:' + totalHeight + 'px;" role="img" aria-labelledby="dependency-graph-svg-title" aria-describedby="dependency-graph-text-summary"><title id="dependency-graph-svg-title">Dependency evidence graph for ' + escapeHtml(state.target) + '</title><desc>Nodes show the active target, certificate, files, packages, and Docker base evidence. Connections show evidence relationships.</desc><g aria-hidden="true">' + edges.join("") + nodes.map(graphNodeMarkup).join("") + '</g></svg>';
     renderGraphTextAlternative(nodes, relationships, nodes.length + " evidence nodes and " + relationships.length + " relationships for " + state.target + ".");
     if (status) status.textContent = nodes.length + " evidence nodes / " + relationships.length + " relationships";
   }
@@ -1482,26 +1503,30 @@
 
   async function runAudit(autoHeal, quiet) {
     if (state.busy) return;
+    var auditTarget = state.target;
     state.busy = true;
-    announceScan((autoHeal ? "Auto-heal and certification" : "Repository scan") + " started for " + state.target + ".");
+    announceScan((autoHeal ? "Auto-heal and certification" : "Repository scan") + " started for " + auditTarget + ".");
     state.auditWasAutoHealed = Boolean(autoHeal);
     setBusy("scan-button", true);
     setBusy("heal-button", true);
     setConnection(autoHeal ? "Auto-Heal Running" : "Scan Running", "warning");
     renderAll();
-    logEvent((autoHeal ? "auto-heal" : "audit") + " started for " + state.target, "info");
+    logEvent((autoHeal ? "auto-heal" : "audit") + " started for " + auditTarget, "info");
     try {
-      state.report = await request("/api/v1/audit", { method: "POST", body: { target: state.target, auto_heal: Boolean(autoHeal), new_only: Boolean(state.newOnly) } });
+      var report = await request("/api/v1/audit", { method: "POST", body: { target: auditTarget, auto_heal: Boolean(autoHeal), new_only: Boolean(state.newOnly) } });
+      if (state.target !== auditTarget) return;
+      state.report = report;
       state.analysis = null;
       state.comparison = null;
       state.buildVerification = null;
       setConnection("All Systems Operational", "success");
       logEvent((autoHeal ? "auto-heal" : "audit") + " complete", "success");
-      announceScan((autoHeal ? "Auto-heal and certification" : "Repository scan") + " complete for " + state.target + ". Findings: " + safeArray(state.report && state.report.issues).length + ".");
+      announceScan((autoHeal ? "Auto-heal and certification" : "Repository scan") + " complete for " + auditTarget + ". Findings: " + safeArray(state.report && state.report.issues).length + ".");
       saveAuditHistory();
       renderAll();
       if (!quiet) showToast(autoHeal ? "Auto-heal evidence is ready." : "Repository audit is ready.", false);
     } catch (error) {
+      if (state.target !== auditTarget) return;
       setConnection("Audit Failed", "error");
       logEvent("audit failed: " + error.message, "error");
       announceScan((autoHeal ? "Auto-heal and certification" : "Repository scan") + " failed: " + error.message);
@@ -1511,6 +1536,7 @@
       setBusy("scan-button", false);
       setBusy("heal-button", false);
       renderAll();
+      if (state.target !== auditTarget) runAudit(false, false);
     }
   }
 
@@ -1944,7 +1970,7 @@
     renderTerminal();
     renderAll();
     await loadTargets();
-    await runAudit(true, true);
+    await runAudit(false, true);
     restoreRoute();
   }
 

@@ -1175,6 +1175,15 @@
     }
     var removed = rows.filter(function (row) { return row.left.kind === "removed"; }).length;
     var added = rows.filter(function (row) { return row.right.kind === "added"; }).length;
+    var diffFileName = "Dockerfile";
+    var fileMatch = sourceDiff.match(/---\s+[ab]\/([^\r\n]+)/);
+    if (fileMatch && fileMatch[1]) {
+      diffFileName = fileMatch[1].trim();
+    } else if (patch && patch.file_path) {
+      diffFileName = patch.file_path;
+    }
+    setText("diff-header-title", "Git Diff - " + diffFileName);
+    setText("diff-file-label", diffFileName);
     badge.textContent = patch && patch.applied ? "APPLIED" : "AUTO-HEALED";
     setText("diff-minus", "-" + removed);
     setText("diff-plus", "+" + added);
@@ -1446,8 +1455,8 @@
       renderAll();
       setTargetPopover(false);
       logEvent("uploaded " + name + " as " + state.target, "success");
-      setZipUploadStatus("Upload complete. Starting audit...", "success");
-      await runAudit(false, false);
+      setZipUploadStatus("Upload complete. Running auto-heal and certification...", "success");
+      await runAudit(true, false);
     } catch (error) {
       logEvent("ZIP upload failed: " + error.message, "error");
       setZipUploadStatus(error.message || "ZIP upload failed.", "error");
@@ -1797,11 +1806,13 @@
       showToast("Generate a certificate first.", true);
       return;
     }
+    var targetSlug = (state.target || "audit").replace(/\\/g, "/").split("/").filter(Boolean).pop() || "workspace";
+    var safeTarget = targetSlug.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[.-]+|[.-]+$/g, "") || "cleanroom";
     var blob = new Blob([JSON.stringify(certificate, null, 2)], { type: "application/json" });
     var link = document.createElement("a");
     var url = URL.createObjectURL(blob);
     link.href = url;
-    link.download = state.target + "-cleanroom-certificate.json";
+    link.download = safeTarget + "-cleanroom-certificate.json";
     document.body.appendChild(link);
     link.click();
     setTimeout(function () {
@@ -1928,7 +1939,8 @@
       showToast(selectedCount ? "No selected findings match the current filters." : "No findings match the current filters.", true);
       return;
     }
-    var targetName = state.target.replace(/[^A-Za-z0-9._-]+/g, "-");
+    var targetSlug = (state.target || "audit").replace(/\\/g, "/").split("/").filter(Boolean).pop() || "workspace";
+    var targetName = targetSlug.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[.-]+|[.-]+$/g, "") || "findings";
     downloadText(targetName + "-findings.csv", findingsCsv(entries), "text/csv;charset=utf-8");
     showToast("Exported " + entries.length + " finding" + (entries.length === 1 ? "" : "s") + " to CSV.", false);
   }
@@ -1956,7 +1968,8 @@
       showToast("Run an audit first.", true);
       return;
     }
-    var targetName = state.target.replace(/[^A-Za-z0-9._-]+/g, "-");
+    var targetSlug = (state.target || "audit").replace(/\\/g, "/").split("/").filter(Boolean).pop() || "workspace";
+    var targetName = targetSlug.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[.-]+|[.-]+$/g, "") || "audit";
     if (kind === "json") downloadText(targetName + "-audit.json", JSON.stringify(state.report, null, 2) + "\n", "application/json");
     if (kind === "certificate") downloadText(targetName + "-certificate.json", JSON.stringify(selectedCertificate(state.report), null, 2) + "\n", "application/json");
     if (kind === "patch") downloadText(targetName + "-healed.patch", safeArray(state.report.unified_diffs).join("\n"), "text/x-diff");

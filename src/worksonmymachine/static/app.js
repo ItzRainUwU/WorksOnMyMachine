@@ -1455,8 +1455,8 @@
       renderAll();
       setTargetPopover(false);
       logEvent("uploaded " + name + " as " + state.target, "success");
-      setZipUploadStatus("Upload complete. Running auto-heal and certification...", "success");
-      await runAudit(true, false);
+      setZipUploadStatus("Upload complete. Running initial scan...", "success");
+      await runAudit(false, false);
     } catch (error) {
       logEvent("ZIP upload failed: " + error.message, "error");
       setZipUploadStatus(error.message || "ZIP upload failed.", "error");
@@ -1807,18 +1807,20 @@
       return;
     }
     var targetSlug = (state.target || "audit").replace(/\\/g, "/").split("/").filter(Boolean).pop() || "workspace";
-    var safeTarget = targetSlug.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[.-]+|[.-]+$/g, "") || "cleanroom";
-    var blob = new Blob([JSON.stringify(certificate, null, 2)], { type: "application/json" });
+    var safeTarget = targetSlug.replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^[-]+|[-]+$/g, "") || "cleanroom";
+    var filename = safeTarget + "-cleanroom-certificate.json";
+    var blob = new Blob([JSON.stringify(certificate, null, 2)], { type: "application/json;charset=utf-8" });
     var link = document.createElement("a");
     var url = URL.createObjectURL(blob);
     link.href = url;
-    link.download = safeTarget + "-cleanroom-certificate.json";
+    link.download = filename;
+    link.setAttribute("download", filename);
     document.body.appendChild(link);
     link.click();
     setTimeout(function () {
       document.body.removeChild(link);
       URL.revokeObjectURL(url);
-    }, 1000);
+    }, 4000);
     logEvent("certificate JSON downloaded", "success");
   }
 
@@ -1894,17 +1896,18 @@
   }
 
   function downloadText(filename, content, type) {
-    var blob = new Blob([content], { type: type || "text/plain" });
+    var blob = new Blob([content], { type: type || "text/plain;charset=utf-8" });
     var link = document.createElement("a");
     var url = URL.createObjectURL(blob);
     link.href = url;
     link.download = filename;
+    link.setAttribute("download", filename);
     document.body.appendChild(link);
     link.click();
     setTimeout(function () {
       document.body.removeChild(link);
       URL.revokeObjectURL(url);
-    }, 1000);
+    }, 4000);
     logEvent(filename + " downloaded", "success");
   }
 

@@ -12,7 +12,7 @@ import unicodedata
 import uuid
 import zipfile
 
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
@@ -68,6 +68,18 @@ MAX_CONTEXT_LINE_CHARS = 500
 MAX_CONTEXT_TOTAL_CHARS = 4_000
 MAX_EXPLANATION_EVIDENCE = 12
 MAX_EXPLANATION_TEXT = 2_000
+
+
+@app.middleware("http")
+async def disable_static_cache_middleware(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/static/") or request.url.path == "/":
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
+
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 

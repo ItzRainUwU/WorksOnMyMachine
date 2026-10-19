@@ -1388,6 +1388,8 @@
     state.comparison = null;
     state.buildVerification = null;
     state.auditWasAutoHealed = false;
+    updateDeleteTargetButton();
+    renderUploadedTargetsList();
     renderTargetDescription();
     renderAll();
     logEvent("workspace target changed to " + state.target, "info");
@@ -1438,6 +1440,8 @@
       state.selectedHealedFilePath = null;
       var select = byId("target-select");
       if (select) select.value = state.target;
+      updateDeleteTargetButton();
+      renderUploadedTargetsList();
       renderTargetDescription();
       renderAll();
       setTargetPopover(false);
@@ -1473,6 +1477,136 @@
     if (!options || options.syncUrl !== false) syncRoute(requested, options);
   }
 
+  function isUploadedTarget(target) {
+    return Boolean(target && (target.indexOf(".worksonmymachine/uploads") === 0 || target.indexOf("upload-") >= 0));
+  }
+
+  function friendlyTargetName(target) {
+    if (!target) return "";
+    if (target === "workspace") return "Current workspace";
+    if (target.indexOf("demo_targets/") === 0) return target.replace("demo_targets/", "");
+    if (isUploadedTarget(target)) {
+      var parts = target.split("/");
+      var last = parts[parts.length - 1];
+      if (last.indexOf("upload-") === 0) return "Upload: " + last.substring(0, 16) + "...";
+      return "Upload: " + last;
+    }
+    return target;
+  }
+
+  function updateDeleteTargetButton() {
+    var btn = byId("delete-target-btn");
+    if (!btn) return;
+    if (isUploadedTarget(state.target)) {
+      btn.hidden = false;
+      btn.title = "Delete uploaded project: " + friendlyTargetName(state.target);
+    } else {
+      btn.hidden = true;
+    }
+  }
+
+  function renderUploadedTargetsList() {
+    var section = byId("uploaded-targets-section");
+    var list = byId("uploaded-targets-list");
+    if (!section || !list) return;
+
+    var uploads = state.targets.filter(isUploadedTarget);
+    if (!uploads.length) {
+      section.hidden = true;
+      list.replaceChildren();
+      return;
+    }
+
+    section.hidden = false;
+    list.replaceChildren();
+    uploads.forEach(function (target) {
+      var item = document.createElement("div");
+      item.className = "uploaded-target-item" + (target === state.target ? " is-active" : "");
+
+      var infoBtn = document.createElement("button");
+      infoBtn.type = "button";
+      infoBtn.className = "uploaded-target-info";
+      infoBtn.title = "Switch active target to " + target;
+      infoBtn.innerHTML = '<span class="uploaded-target-name">' + escapeHtml(friendlyTargetName(target)) + '</span>' +
+        (target === state.target ? '<span class="uploaded-target-active-pill">ACTIVE</span>' : '');
+      infoBtn.addEventListener("click", function () {
+        selectTargetByName(target);
+        setTargetPopover(false);
+      });
+
+      var delBtn = document.createElement("button");
+      delBtn.type = "button";
+      delBtn.className = "delete-upload-item-btn";
+      delBtn.title = "Delete " + friendlyTargetName(target);
+      delBtn.setAttribute("aria-label", "Delete " + friendlyTargetName(target));
+      delBtn.innerHTML = '<span class="icon-slot" data-icon="closeDismiss" data-size="12"></span>';
+      delBtn.addEventListener("click", function (evt) {
+        evt.stopPropagation();
+        deleteUploadTarget(target);
+      });
+
+      item.appendChild(infoBtn);
+      item.appendChild(delBtn);
+      list.appendChild(item);
+    });
+  }
+
+  function selectTargetByName(target) {
+    if (state.busy || state.target === target) return;
+    state.target = target;
+    var select = byId("target-select");
+    if (select) select.value = state.target;
+    state.report = null;
+    state.analysis = null;
+    state.comparison = null;
+    state.buildVerification = null;
+    state.auditWasAutoHealed = false;
+    updateDeleteTargetButton();
+    renderUploadedTargetsList();
+    renderTargetDescription();
+    renderAll();
+    logEvent("target changed to " + state.target, "info");
+    runAudit(false, false);
+  }
+
+  async function deleteUploadTarget(target) {
+    if (state.busy) return;
+    var name = friendlyTargetName(target);
+    try {
+      await request("/api/v1/targets?target=" + encodeURIComponent(target), { method: "DELETE" });
+      showToast("Deleted " + name, false);
+      logEvent("deleted upload " + target, "info");
+      if (state.target === target) {
+        state.target = "workspace";
+        await loadTargets();
+        await runAudit(false, false);
+      } else {
+        await loadTargets();
+      }
+    } catch (error) {
+      showToast("Failed to delete upload: " + error.message, true);
+      logEvent("failed to delete upload: " + error.message, "error");
+    }
+  }
+
+  async function clearAllUploads() {
+    if (state.busy) return;
+    try {
+      var res = await request("/api/v1/uploads", { method: "DELETE" });
+      showToast("Deleted " + (res && res.deleted_count != null ? res.deleted_count : "all") + " uploaded project(s)", false);
+      logEvent("cleared all uploaded projects", "info");
+      if (isUploadedTarget(state.target)) {
+        state.target = "workspace";
+        await loadTargets();
+        await runAudit(false, false);
+      } else {
+        await loadTargets();
+      }
+    } catch (error) {
+      showToast("Failed to clear uploads: " + error.message, true);
+    }
+  }
+
   async function loadTargets() {
     try {
       var payload = await request("/api/v1/targets?scope=workspace", { method: "GET" });
@@ -1481,16 +1615,77 @@
       var select = byId("target-select");
       if (select) {
         select.replaceChildren();
-        var options = state.targets.slice();
-        if (options.indexOf(state.target) < 0) options.unshift(state.target);
-        options.forEach(function (target) {
-          var option = document.createElement("option");
-          option.value = target;
-          option.textContent = target === "workspace" ? "Current workspace" : target;
-          option.selected = target === state.target;
-          select.appendChild(option);
+        var allTargets = state.targets.slice();
+        if (allTargets.indexOf(state.target) < 0) allTargets.unshift(state.target);
+
+        var workspaceList = [];
+        var demoList = [];
+        var uploadList = [];
+        var otherList = [];
+
+        allTargets.forEach(function (target) {
+          if (target === "workspace") {
+            workspaceList.push(target);
+          } else if (target.indexOf("demo_targets/") === 0) {
+            demoList.push(target);
+          } else if (isUploadedTarget(target)) {
+            uploadList.push(target);
+          } else {
+            otherList.push(target);
+          }
         });
+
+        if (workspaceList.length) {
+          workspaceList.forEach(function (target) {
+            var opt = document.createElement("option");
+            opt.value = target;
+            opt.textContent = "Current workspace";
+            opt.selected = target === state.target;
+            select.appendChild(opt);
+          });
+        }
+
+        if (demoList.length) {
+          var demoGroup = document.createElement("optgroup");
+          demoGroup.label = "DEMO BENCHMARKS";
+          demoList.forEach(function (target) {
+            var opt = document.createElement("option");
+            opt.value = target;
+            opt.textContent = target.replace("demo_targets/", "");
+            opt.selected = target === state.target;
+            demoGroup.appendChild(opt);
+          });
+          select.appendChild(demoGroup);
+        }
+
+        if (uploadList.length) {
+          var uploadGroup = document.createElement("optgroup");
+          uploadGroup.label = "UPLOADED PROJECTS";
+          uploadList.forEach(function (target) {
+            var opt = document.createElement("option");
+            opt.value = target;
+            opt.textContent = friendlyTargetName(target);
+            opt.selected = target === state.target;
+            uploadGroup.appendChild(opt);
+          });
+          select.appendChild(uploadGroup);
+        }
+
+        if (otherList.length) {
+          var otherGroup = document.createElement("optgroup");
+          otherGroup.label = "OTHER TARGETS";
+          otherList.forEach(function (target) {
+            var opt = document.createElement("option");
+            opt.value = target;
+            opt.textContent = target;
+            opt.selected = target === state.target;
+            otherGroup.appendChild(opt);
+          });
+          select.appendChild(otherGroup);
+        }
       }
+      renderUploadedTargetsList();
+      updateDeleteTargetButton();
       setConnection("All Systems Operational", "success");
       renderTargetDescription();
       logEvent("loaded " + state.targets.length + " target(s)", "success");
@@ -1855,6 +2050,14 @@
       if (event.key === "Enter") useWorkspaceTarget();
       if (event.key === "Escape") setTargetPopover(false);
     });
+    on("delete-target-btn", "click", function () {
+      if (isUploadedTarget(state.target)) {
+        deleteUploadTarget(state.target);
+      }
+    });
+    on("clear-all-uploads-btn", "click", function () {
+      clearAllUploads();
+    });
     on("target-select", "change", function (event) {
       state.target = event.target.value || "workspace";
       state.report = null;
@@ -1862,6 +2065,8 @@
       state.comparison = null;
       state.buildVerification = null;
       state.auditWasAutoHealed = false;
+      updateDeleteTargetButton();
+      renderUploadedTargetsList();
       renderTargetDescription();
       renderAll();
       logEvent("target changed to " + state.target, "info");

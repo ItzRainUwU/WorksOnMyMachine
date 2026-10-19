@@ -12,7 +12,7 @@ import unicodedata
 import uuid
 import zipfile
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
@@ -471,6 +471,54 @@ def upload_zip(file: UploadFile = File(...)) -> UploadResponse:
             shutil.rmtree(staging, ignore_errors=True)
         if bundle is not None and not committed:
             shutil.rmtree(bundle, ignore_errors=True)
+
+
+def _delete_upload_target(target: str) -> bool:
+    """Delete an uploaded target bundle from the managed upload directory."""
+
+    root = UPLOADS_DIR.resolve()
+    workspace = PROJECT_ROOT.resolve()
+    if not root.is_dir():
+        return False
+    normalized = target.strip().replace("\\", "/")
+    for bundle in sorted(root.iterdir(), key=lambda item: item.name):
+        if not bundle.is_dir() or bundle.name.startswith("."):
+            continue
+        try:
+            rel = _upload_target(bundle).resolve().relative_to(workspace).as_posix()
+            bundle_rel = bundle.resolve().relative_to(workspace).as_posix()
+            if rel == normalized or bundle_rel == normalized or bundle.name == normalized or normalized.endswith(bundle.name):
+                shutil.rmtree(bundle, ignore_errors=True)
+                return True
+        except (OSError, ValueError):
+            continue
+    return False
+
+
+@app.delete("/api/v1/targets")
+def delete_target(target: str = Query(..., description="Uploaded target path to delete")) -> dict[str, object]:
+    """Delete an uploaded target safely without permitting workspace escape."""
+
+    if not _delete_upload_target(target):
+        raise HTTPException(
+            status_code=404,
+            detail="Target could not be found or is not an uploaded repository",
+        )
+    return {"deleted": True, "target": target}
+
+
+@app.delete("/api/v1/uploads")
+def delete_all_uploads() -> dict[str, object]:
+    """Delete all uploaded target repositories from the managed uploads directory."""
+
+    root = UPLOADS_DIR.resolve()
+    count = 0
+    if root.is_dir():
+        for bundle in list(root.iterdir()):
+            if bundle.is_dir() and not bundle.name.startswith("."):
+                shutil.rmtree(bundle, ignore_errors=True)
+                count += 1
+    return {"deleted_count": count}
 
 
 def _looks_like_repository(directory: Path) -> bool:

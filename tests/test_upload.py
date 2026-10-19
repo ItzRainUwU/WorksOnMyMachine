@@ -90,3 +90,35 @@ def test_zip_upload_rejects_duplicate_paths(monkeypatch, tmp_path: Path) -> None
 
     assert response.status_code == 400
     assert "duplicate" in response.json()["detail"]
+
+
+def test_delete_uploaded_target_and_clear_all(monkeypatch, tmp_path: Path) -> None:
+    client = _client(monkeypatch, tmp_path)
+    payload = _zip_bytes(("sample/README.md", b"# sample\n"))
+
+    upload_res = client.post(
+        "/api/v1/upload",
+        files={"file": ("sample.zip", payload, "application/zip")},
+    )
+    assert upload_res.status_code == 200
+    target = upload_res.json()["target"]
+    assert target in client.get("/api/v1/targets?scope=workspace").json()["targets"]
+
+    delete_res = client.delete(f"/api/v1/targets?target={target}")
+    assert delete_res.status_code == 200
+    assert delete_res.json()["deleted"] is True
+    assert target not in client.get("/api/v1/targets?scope=workspace").json()["targets"]
+
+    # Re-upload and test clear all
+    upload_res2 = client.post(
+        "/api/v1/upload",
+        files={"file": ("sample2.zip", payload, "application/zip")},
+    )
+    assert upload_res2.status_code == 200
+    target2 = upload_res2.json()["target"]
+    assert target2 in client.get("/api/v1/targets?scope=workspace").json()["targets"]
+
+    clear_res = client.delete("/api/v1/uploads")
+    assert clear_res.status_code == 200
+    assert clear_res.json()["deleted_count"] >= 1
+    assert target2 not in client.get("/api/v1/targets?scope=workspace").json()["targets"]

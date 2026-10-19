@@ -7,17 +7,19 @@ This guide provides end-to-end instructions for testing **WorksOnMyMachine** usi
 ## 1. Pick a Good Repository to Test
 
 ### Option A: Real External GitHub Repo — `flask-realworld-example-app` (Recommended for ZIP Upload)
-* **GitHub Repository:** [`gothinkster/flask-realworld-example-app`](https://github.com/gothinkster/flask-realworld-example-app)
-* **Direct ZIP Download Link:**  
-  [https://github.com/gothinkster/flask-realworld-example-app/archive/refs/heads/master.zip](https://github.com/gothinkster/flask-realworld-example-app/archive/refs/heads/master.zip)
-* **Why it's a great test candidate:**
+
+- **GitHub Repository:** [`gothinkster/flask-realworld-example-app`](https://github.com/gothinkster/flask-realworld-example-app)
+- **Direct ZIP Download Link:**  
+  <https://github.com/gothinkster/flask-realworld-example-app/archive/refs/heads/master.zip>
+- **Why it's a great test candidate:**
   - Widely recognized open-source production reference project (3,000+ GitHub stars).
   - Unpacks 45 files across 9 directories into an isolated sandbox.
   - Automatically flags missing environment variables (`conduit/settings.py`) that detonate in cleanroom CI runners without safe defaults.
 
 ### Option B: Built-in Benchmark Target — `demo_targets/nightmare_ml_service` (Recommended for Full Auto-Heal & Video Demo)
-* **Location in Workspace:** `demo_targets/nightmare_ml_service`
-* **Why it's the ultimate test candidate:**
+
+- **Location in Workspace:** `demo_targets/nightmare_ml_service`
+- **Why it's the ultimate test candidate:**
   - Specifically crafted to showcase **all 5 layers of cross-OS portability landmines**:
     1. **Compiler Diagnostics:** Missing CPython headers (`Python.h`) and PostgreSQL client (`libpq-dev`).
     2. **Shell Portability:** Entrypoint with Windows `\r\n` (CRLF) line endings and missing shebang.
@@ -31,14 +33,18 @@ This guide provides end-to-end instructions for testing **WorksOnMyMachine** usi
 ## 2. Web UI Testing Workflow (Step-by-Step)
 
 ### Step 1: Launch the Local Server
+
 Ensure the backend server is running on `http://127.0.0.1:8000/`:
+
 ```powershell
 # Using the workspace virtual environment
 & ".\.venv\Scripts\python.exe" -m uvicorn worksonmymachine.app:app --host 127.0.0.1 --port 8000
 ```
-Open your browser to: **[http://127.0.0.1:8000](http://127.0.0.1:8000)**
+
+Open your browser to: **<http://127.0.0.1:8000>**
 
 ### Step 2: Test the "Drop Project ZIP" Feature
+
 1. Download [`master.zip`](https://github.com/gothinkster/flask-realworld-example-app/archive/refs/heads/master.zip) from GitHub.
 2. In the top navigation bar, click **Open workspace target**.
 3. Drag and drop the downloaded `.zip` file onto the dashed upload area:  
@@ -49,6 +55,7 @@ Open your browser to: **[http://127.0.0.1:8000](http://127.0.0.1:8000)**
    - The dashboard dynamically populates with findings, readiness gauge, and file tree.
 
 ### Step 3: Inspect "Cross-OS Bugs"
+
 1. Click **Cross-OS Bugs** in the left sidebar (or URL `#bugs`).
 2. Test the severity filter pills:
    - Click **High** to view critical breaking issues.
@@ -57,12 +64,14 @@ Open your browser to: **[http://127.0.0.1:8000](http://127.0.0.1:8000)**
 3. Test search: Type `ENV` or `PATH` in the search box to filter rows live.
 
 ### Step 4: Inspect the "Dependency Graph"
+
 1. Click **Dependency Graph** in the left sidebar (or URL `#graph`).
 2. **What to observe:**
    - A wide interactive canvas mapping target files $\rightarrow$ Merkle certificate $\rightarrow$ detected package dependencies $\rightarrow$ Docker base image.
    - Click **View dependency graph as text** to verify screen-reader / accessible plain-text alternative.
 
 ### Step 5: Test "Auto-Heal & Certify"
+
 1. Switch target to `demo_targets/nightmare_ml_service` via the top target dropdown.
 2. Notice the initial score: **Linux Readiness: 0%** (Awaiting scan / Failed compatibility checks).
 3. Click the bright green **Auto-Heal & Certify** button in the top right.
@@ -76,6 +85,7 @@ Open your browser to: **[http://127.0.0.1:8000](http://127.0.0.1:8000)**
    - Immediately navigates to **Build & Deploy** (`#build`) showing all copy-on-write healed files.
 
 ### Step 6: Download the Merkle Certificate
+
 1. On the **Dashboard**, scroll to the **CleanRoom Certificate** drawer.
 2. Click **Download certificate JSON** (or copy to clipboard).
 3. Open the downloaded JSON to inspect:
@@ -98,20 +108,27 @@ $PYTHON=".\.venv\Scripts\python.exe"
 ```
 
 ### 1. Fast Static Scan (Rich Table Output)
+
 Scan a target and display detected landmines with categorized severity:
+
 ```powershell
 & $PYTHON -m worksonmymachine scan nightmare_ml_service
 ```
+
 *Expected output:* A formatted Rich table listing `DOCKER-SHELL-EXEC`, `PATH-WINDOWS-DRIVE`, `ENV-MISSING`, `SHELL-CRLF`, and a **Readiness score: 0.00/100**.
 
 ---
 
 ### 2. Compiler Log Diagnosis & Auto-Apt Package Resolver
+
 Diagnose compiler errors from GCC, Clang, or Python.h and get the exact package manager fix:
+
 ```powershell
 & $PYTHON -m worksonmymachine parse-log nightmare_ml_service
 ```
+
 *Expected output:*
+
 ```text
 Root cause: A Python extension is being compiled without the CPython development header...
 Exact apt-get install fix: apt-get update && apt-get install -y --no-install-recommends build-essential g++ gcc libgl1 libglib2.0-0 libpq-dev python3-dev
@@ -120,11 +137,15 @@ Exact apt-get install fix: apt-get update && apt-get install -y --no-install-rec
 ---
 
 ### 3. Copy-on-Write Auto-Healing (Dry Run)
+
 Simulate auto-healing without mutating your source repository:
+
 ```powershell
 & $PYTHON -m worksonmymachine heal nightmare_ml_service
 ```
+
 *Expected output:*
+
 - **Before readiness score:** `0.00/100`
 - **After readiness score:** `100.00/100`
 - **CleanRoom status:** `Uncertified -> CleanRoom Certified (100%)`
@@ -133,7 +154,9 @@ Simulate auto-healing without mutating your source repository:
 ---
 
 ### 4. Apply Safe Healing to the Target
+
 To permanently write the auto-healed changes to disk:
+
 ```powershell
 & $PYTHON -m worksonmymachine audit nightmare_ml_service --auto-heal --apply --yes
 ```
@@ -141,7 +164,9 @@ To permanently write the auto-healed changes to disk:
 ---
 
 ### 5. Generate a CleanRoom Reproducibility Certificate
+
 Generate a deterministic Merkle proof:
+
 ```powershell
 # Human-readable table
 & $PYTHON -m worksonmymachine certify nightmare_ml_service
@@ -153,7 +178,9 @@ Generate a deterministic Merkle proof:
 ---
 
 ### 6. Cryptographically Sign & Verify a Certificate
+
 Sign the certificate with HMAC-SHA256 for tamper evidence:
+
 ```powershell
 # Sign certificate
 & $PYTHON -m worksonmymachine certify nightmare_ml_service --signing-key "omnirush-secret-key" --signature-key-id "ci-runner-1" --json --output signed_cert.json
@@ -166,7 +193,9 @@ Sign the certificate with HMAC-SHA256 for tamper evidence:
 ---
 
 ### 7. Export CI/CD Reports (SARIF, Markdown, JSON)
+
 Integrate with GitHub Actions / CI runners:
+
 ```powershell
 # Export GitHub Code Scanning SARIF report
 & $PYTHON -m worksonmymachine audit nightmare_ml_service --format sarif --output audit.sarif
@@ -178,10 +207,13 @@ Integrate with GitHub Actions / CI runners:
 ---
 
 ### 8. Live Real-Time File Watcher
+
 Run a continuous background watcher that rescans as soon as you save any file:
+
 ```powershell
 & $PYTHON -m worksonmymachine watch nightmare_ml_service
 ```
+
 *(Press `Ctrl+C` to stop watching).*
 
 ---

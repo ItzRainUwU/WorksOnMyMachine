@@ -6,6 +6,9 @@ build-backend = "setuptools.build_meta"
 name = "worksonmymachine"
 version = "0.1.0"
 description = "Cross-OS reproducibility diagnostics and CleanRoom certification"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "ItzRainUwU" }]
 requires-python = ">=3.11,<3.12"
 dependencies = [
     "fastapi==0.115.0",
